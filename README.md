@@ -4,7 +4,7 @@ A small app that searches Walmart.com and finds third-party Marketplace sellers,
 
 ## Rules
 - **Only US sellers**: the seller's business address must be in the US (US state + ZIP code).
-- **No clothing-only stores**: rejected if 80% or more of the seller's products are clothing.
+- **Only stores that sell what we buy**: each product is sorted into a buy category (Toys & Games, Health & Beauty, OTC, Personal Care, Household Essentials, Baby, Supplements, Apparel basics), a don't-buy category (Clothing, Shoes, Automotive, Outdoor & Camping, Books, Movies & Music, Bedding & Linens, Furniture, Home décor, Costumes, Party supplies, Medical equipment, Used/Refurbished, Computers, Phone cases, Security cameras, Jewelry, Precious metals, Alcohol), or neutral (Grocery, Electronics). A store is rejected only when 60%+ of its sorted products are don't-buy and it has fewer than 3 (and under 25%) buy products. Stores with fewer than 3 sorted products are kept.
 - **Skip numbers we already have**: rejected if the seller's phone is in your numbers list, or another seller in the same search already has it.
 
 ## Numbers we already have

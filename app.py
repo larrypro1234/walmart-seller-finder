@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 7
+VERSION = 8
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -61,15 +61,135 @@ CLOTHING_WORDS = re.compile(
 )
 
 
-def is_clothing(text):
-    return bool(CLOTHING_WORDS.search(text or ""))
+# What a store sells. Each product is sorted into the first category whose words match.
+# Order matters: used/refurbished first, then what we BUY (so "LEGO car" is Toys and
+# "baby blanket" is Baby), then what we DON'T buy, then neutral categories.
+
+def _words(*words):
+    return re.compile(r"\b(" + "|".join(words) + r")\b", re.I)
 
 
-def rule_no_clothing_only(s):
-    total = len(s.get("products", {}))
-    clothing = sum(1 for t in s.get("products", {}).values() if is_clothing(t))
-    if total >= 3 and clothing / total >= 0.8:
-        return f"Clothing-only store ({clothing} of {total} products are clothing)"
+USED = _words(r"refurbished", r"renewed", r"restored", r"pre-?owned", r"open[- ]box", r"\(used\)", r"used -")
+
+BUY = [
+    ("Apparel basics", _words(r"socks?", r"boxers?", r"boxer briefs", r"briefs", r"underwear", r"undershirts?",
+                              r"boy ?shorts", r"panties", r"trunks")),
+    ("Toys & Games", _words(r"toys?", r"lego", r"hasbro", r"mattel", r"barbie", r"hot wheels", r"fisher[- ]price",
+                            r"nerf", r"play-?doh", r"monopoly", r"puzzles?", r"board games?", r"card games?",
+                            r"dolls?", r"action figures?", r"plush", r"stuffed animals?", r"building (set|blocks|kit)",
+                            r"playsets?", r"funko", r"uno", r"jenga", r"crayola", r"melissa (&|and) doug",
+                            r"pok[eé]mon", r"squishmallows?", r"magna-?tiles", r"vtech", r"little tikes", r"games? for kids")),
+    ("OTC", _words(r"tylenol", r"advil", r"motrin", r"aleve", r"ibuprofen", r"acetaminophen", r"naproxen", r"allergy",
+                   r"antihistamine", r"claritin", r"zyrtec", r"allegra", r"benadryl", r"cold (&|and) flu", r"antacid",
+                   r"tums", r"pepto", r"cough", r"nasal spray", r"mucinex", r"dayquil", r"nyquil", r"pain relie(f|ver)",
+                   r"first aid", r"band-?aid", r"hydrocortisone", r"neosporin", r"laxative", r"eye drops")),
+    ("Supplements", _words(r"vitamins?", r"multivitamins?", r"supplements?", r"protein powder", r"probiotics?",
+                           r"fish oil", r"omega-?3", r"collagen", r"melatonin", r"garden of life", r"nature made",
+                           r"centrum", r"one a day", r"electrolytes?", r"biotin", r"magnesium", r"zinc", r"elderberry")),
+    ("Baby", _words(r"diapers?", r"baby wipes", r"pampers", r"huggies", r"luvs", r"infant formula", r"baby formula",
+                    r"similac", r"enfamil", r"baby bottles?", r"pacifiers?", r"sippy", r"baby", r"teethers?", r"newborn")),
+    ("Health & Beauty", _words(r"makeup", r"cosmetics?", r"mascara", r"lipstick", r"lip gloss", r"foundation",
+                               r"eyeliner", r"eyeshadow", r"concealer", r"nail polish", r"revlon", r"l'?or[eé]al",
+                               r"maybelline", r"cerave", r"neutrogena", r"olay", r"cetaphil", r"aveeno", r"la roche-posay",
+                               r"skin ?care", r"moisturi[sz]er", r"serum", r"face wash", r"cleanser", r"sunscreen",
+                               r"lotion", r"perfume", r"fragrance", r"cologne", r"eau de")),
+    ("Personal Care", _words(r"shampoo", r"conditioner", r"body wash", r"soap", r"deodorant", r"antiperspirant",
+                             r"toothpaste", r"toothbrush(es)?", r"razors?", r"shaving", r"shave", r"dove", r"hair care",
+                             r"hair (oil|gel|spray|mask)", r"floss", r"mouthwash", r"tampons?", r"feminine", r"(period|maxi|menstrual|panty) (pads|liners)",
+                             r"crest", r"colgate", r"gillette", r"old spice", r"dry shampoo")),
+    ("Household Essentials", _words(r"tide", r"dawn", r"lysol", r"clorox", r"detergent", r"dish ?soap", r"cleaner",
+                                    r"cleaning", r"disinfect(ant|ing)", r"paper towels?", r"toilet paper", r"bath tissue",
+                                    r"bounty", r"charmin", r"trash bags?", r"garbage bags?", r"glad", r"febreze",
+                                    r"swiffer", r"laundry", r"dryer sheets", r"sponges?", r"ziploc", r"bleach",
+                                    r"air freshener", r"downy", r"gain", r"cascade", r"mr\.? clean", r"scrub")),
+]
+
+DONT_BUY = [
+    ("Computers", _words(r"laptops?", r"notebook computer", r"chromebooks?", r"macbook", r"desktop (computer|pc)",
+                         r"gaming pc", r"pc tower", r"all-in-one (pc|computer)", r"mini pc")),
+    ("Phone cases", _words(r"phone cases?", r"(iphone|galaxy|pixel|samsung|motorola)[\w\s+-]{0,25}\bcases?", r"case for (iphone|samsung|galaxy|pixel)",
+                           r"screen protectors?", r"phone covers?")),
+    ("Security cameras", _words(r"security cameras?", r"surveillance", r"cctv", r"doorbell cameras?", r"ip cameras?",
+                                r"nvr", r"dvr", r"wireless camera system", r"spy cam(era)?")),
+    ("Jewelry", _words(r"jewelry", r"jewellery", r"necklaces?", r"bracelets?", r"earrings?", r"pendants?", r"anklets?",
+                       r"engagement rings?", r"wedding bands?", r"sterling silver", r"1[04]k gold", r"diamond rings?")),
+    ("Precious metals", _words(r"bullion", r"gold bars?", r"silver bars?", r"silver coins?", r"gold coins?", r"troy oz",
+                               r"silver rounds?", r"proof coins?", r"morgan dollar", r"silver eagle", r"numismatic")),
+    ("Alcohol", _words(r"wine", r"beer", r"vodka", r"whiske?y", r"bourbon", r"tequila", r"rum", r"liquor", r"champagne",
+                       r"sake", r"hard seltzer", r"gin", r"brandy", r"cognac")),
+    ("Shoes", _words(r"shoes?", r"sneakers?", r"boots?", r"sandals?", r"slippers?", r"heels", r"loafers?", r"cleats",
+                     r"flip[- ]flops?", r"clogs?", r"footwear")),
+    ("Costumes", _words(r"costumes?", r"wigs?", r"cosplay", r"halloween mask")),
+    ("Clothing", re.compile(CLOTHING_WORDS.pattern + r"|\b(hats?|caps|beanies?|scarf|scarves|gloves|belts?|handbags?|purses?)\b", re.I)),
+    ("Automotive", _words(r"car", r"cars", r"truck", r"tires?", r"brake", r"headlights?", r"tail ?lights?", r"bumper",
+                          r"motor oil", r"spark plugs?", r"wiper blades?", r"auto parts?", r"automotive", r"vehicle",
+                          r"seat covers?", r"floor mats?", r"radiator", r"alternator", r"oem", r"jeep", r"ford", r"chevy",
+                          r"toyota", r"honda", r"dodge", r"silverado")),
+    ("Outdoor & Camping", _words(r"tents?", r"sleeping bags?", r"camping", r"hiking", r"backpacking", r"trekking poles?",
+                                 r"camp stove", r"hammocks?", r"fishing", r"hunting")),
+    ("Books", _words(r"books?", r"paperback", r"hardcover", r"novel", r"textbook", r"isbn", r"workbook")),
+    ("Movies & Music", _words(r"dvd", r"blu-?ray", r"cd", r"vinyl", r"lp", r"soundtrack", r"album", r"4k uhd")),
+    ("Bedding & Linens", _words(r"sheet sets?", r"bed sheets?", r"pillows?", r"pillowcases?", r"comforters?", r"duvet",
+                                r"blankets?", r"quilts?", r"mattress (topper|pad|protector)", r"bedspreads?", r"linens?",
+                                r"throws?", r"bath towels?", r"towel sets?", r"curtains?")),
+    ("Furniture", _words(r"sofas?", r"couch(es)?", r"desks?", r"tables?", r"chairs?", r"dressers?", r"bookshel(f|ves)",
+                         r"cabinets?", r"bed frames?", r"mattress(es)?", r"nightstands?", r"ottomans?", r"recliners?",
+                         r"futons?", r"bar stools?", r"tv stands?", r"headboards?", r"furniture")),
+    ("Home décor", _words(r"wall art", r"canvas prints?", r"posters?", r"ornaments?", r"figurines?", r"artificial (flowers?|plants?)",
+                          r"wreaths?", r"vases?", r"d[eé]cor", r"wall decals?", r"picture frames?", r"tapestry")),
+    ("Party supplies", _words(r"balloons?", r"party favors?", r"party supplies", r"party decorations?", r"banners?",
+                              r"confetti", r"pi[nñ]atas?", r"cake toppers?", r"paper plates", r"party plates", r"streamers")),
+    ("Medical equipment", _words(r"wheelchairs?", r"walkers?", r"rollators?", r"canes?", r"crutch(es)?", r"hospital beds?",
+                                 r"blood pressure monitors?", r"oximeters?", r"nebulizers?", r"cpap", r"mobility scooters?",
+                                 r"commodes?", r"shower chairs?", r"knee scooters?", r"stethoscopes?")),
+]
+
+# Neither buy nor don't-buy (yet): they don't count for or against a store.
+NEUTRAL = [
+    ("Grocery", _words(r"snacks?", r"chips", r"cereal", r"candy", r"chocolate", r"coffee", r"tea", r"cookies?",
+                       r"crackers?", r"gum", r"soda", r"juice", r"sauce", r"seasoning", r"spices?", r"pasta", r"jerky")),
+    ("Electronics", _words(r"headphones?", r"earbuds?", r"chargers?", r"charging", r"cables?", r"speakers?", r"bluetooth",
+                           r"power banks?", r"smart ?watch", r"tablets?", r"tv", r"television", r"keyboard", r"mouse")),
+]
+
+BUY_NAMES = {n for n, _ in BUY}
+DONT_BUY_NAMES = {n for n, _ in DONT_BUY}
+
+
+def classify(text):
+    if USED.search(text or ""):
+        return "Used/Refurbished"
+    for name, rx in BUY + DONT_BUY + NEUTRAL:
+        if rx.search(text or ""):
+            return name
+    return None
+
+
+def store_mix(s):
+    counts = {}
+    for t in s.get("products", {}).values():
+        c = classify(t)
+        if c:
+            counts[c] = counts.get(c, 0) + 1
+    return counts
+
+
+def describe_mix(counts):
+    return " · ".join(f"{k} {v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
+def rule_store_categories(s):
+    """Reject only stores whose main merchandise is what we don't buy.
+    A store with a meaningful amount of what we buy (3+ products or 25%+) is kept."""
+    counts = store_mix(s)
+    buy = sum(v for k, v in counts.items() if k in BUY_NAMES)
+    dont = {k: v for k, v in counts.items() if k in DONT_BUY_NAMES or k == "Used/Refurbished"}
+    classified = sum(counts.values())
+    if classified < 3 or buy >= 3 or buy / classified >= 0.25:
+        return None
+    if sum(dont.values()) / classified >= 0.6:
+        top = ", ".join(k for k, _ in sorted(dont.items(), key=lambda kv: -kv[1])[:2])
+        return f"Mostly sells what we don't buy: {top} ({sum(dont.values())} of {classified} products)"
     return None
 
 
@@ -131,7 +251,7 @@ def rule_no_duplicate_phone(s):
 
 RULES = [
     {"id": "us_only", "label": "Only US sellers", "check": rule_us_only},
-    {"id": "no_clothing_only", "label": "No clothing-only stores", "check": rule_no_clothing_only},
+    {"id": "store_categories", "label": "Only stores that sell what we buy", "check": rule_store_categories},
     {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
@@ -458,6 +578,7 @@ def run_scrape(keywords, pages, active_rules, delay):
                     info = parse_seller_page(data, html)
                     rec["products"].update(info.pop("store_products"))
                     rec.update(info)
+            rec["store_mix"] = describe_mix(store_mix(rec))
             reasons = [r["check"](rec) for r in RULES if r["id"] in active_rules]
             reasons = [r for r in reasons if r]
             rec["status"] = "Rejected" if reasons else "Good"
@@ -483,7 +604,7 @@ def run_scrape(keywords, pages, active_rules, delay):
 
 
 COLUMNS = ["status", "reason", "seller_name", "business_name", "phone", "email", "address", "country",
-           "rating", "review_count", "seller_url", "catalog_seller_id", "products_checked", "keywords"]
+           "rating", "review_count", "seller_url", "catalog_seller_id", "products_checked", "store_mix", "keywords"]
 
 
 def row(rec):
@@ -627,7 +748,7 @@ function draw(){
     document.getElementById(id).textContent=s.filter(x=>x.status===k).length;
   const list=s.filter(x=>x.status===tab);
   document.getElementById("rows").innerHTML=list.length?list.map(x=>`<tr>
-    <td><b>${esc(x.seller_name)}</b>${x.business_name&&x.business_name!==x.seller_name?`<br><span class="hint">${esc(x.business_name)}</span>`:""}</td>
+    <td><b>${esc(x.seller_name)}</b>${x.business_name&&x.business_name!==x.seller_name?`<br><span class="hint">${esc(x.business_name)}</span>`:""}${x.store_mix?`<br><span class="hint">Sells: ${esc(x.store_mix)}</span>`:""}</td>
     <td>${esc(x.phone)}</td><td>${esc(x.email)}</td><td>${esc(x.address)}</td>
     <td>${x.rating?esc((+x.rating).toFixed?.(1)??x.rating):""}${x.review_count?` <span class="hint">(${esc(x.review_count)})</span>`:""}</td>
     <td>${x.seller_url?`<a href="${esc(x.seller_url)}" target="_blank">Open</a>`:""}</td>
