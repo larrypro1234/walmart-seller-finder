@@ -3,3 +3,4 @@ browser-profile/
 app.log
 app.py.new
 __pycache__/
+known_numbers.txt

@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import webbrowser
+import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,7 +32,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 6
+VERSION = 7
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -72,9 +73,66 @@ def rule_no_clothing_only(s):
     return None
 
 
+# Numbers we already have. Kept only on this computer (known_numbers.txt next to
+# app.py), never on GitHub. Good sellers found by the app are added automatically.
+KNOWN_FILE = HERE / "known_numbers.txt"
+PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)")
+
+
+def normalize_phone(p):
+    digits = re.sub(r"\D", "", str(p or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else ""
+
+
+def load_known():
+    try:
+        return {l.strip() for l in KNOWN_FILE.read_text().splitlines() if l.strip()}
+    except FileNotFoundError:
+        return set()
+
+
+KNOWN = load_known()
+RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
+
+
+def add_known(numbers):
+    new = {n for n in numbers if n and n not in KNOWN}
+    if new:
+        KNOWN.update(new)
+        KNOWN_FILE.write_text("\n".join(sorted(KNOWN)) + "\n")
+    return len(new)
+
+
+def phones_in_file(name, raw):
+    """Every phone number in an uploaded .xlsx, .csv or .txt file, whatever column it's in."""
+    if name.lower().endswith(".xlsx"):
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            text = " ".join(z.read(n).decode("utf-8", "ignore") for n in z.namelist()
+                            if n.startswith(("xl/sharedStrings", "xl/worksheets/")))
+        text = re.sub(r"<[^>]+>", " ", text)
+    else:
+        text = raw.decode("utf-8", "ignore")
+    return {normalize_phone(m) for m in PHONE_RE.findall(text)} - {""}
+
+
+def rule_no_duplicate_phone(s):
+    p = normalize_phone(s.get("phone"))
+    if not p:
+        return None
+    other = RUN_PHONES.get(p)
+    if other and other != s["seller_name"]:
+        return f"Same phone as {other}"
+    if p in KNOWN and other != s["seller_name"]:
+        return "Already have this number"
+    return None
+
+
 RULES = [
     {"id": "us_only", "label": "Only US sellers", "check": rule_us_only},
     {"id": "no_clothing_only", "label": "No clothing-only stores", "check": rule_no_clothing_only},
+    {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
 
@@ -350,6 +408,7 @@ class Browser:
 
 def run_scrape(keywords, pages, active_rules, delay):
     sellers = {}
+    RUN_PHONES.clear()
     br = None
     try:
         br = Browser(delay)
@@ -403,6 +462,10 @@ def run_scrape(keywords, pages, active_rules, delay):
             reasons = [r for r in reasons if r]
             rec["status"] = "Rejected" if reasons else "Good"
             rec["reason"] = "; ".join(reasons)
+            phone = normalize_phone(rec.get("phone"))
+            if rec["status"] == "Good" and phone:
+                RUN_PHONES[phone] = rec["seller_name"]
+                add_known([phone])
             publish(sellers)
 
         save_csv(sellers)
@@ -500,6 +563,13 @@ a{color:var(--blue)}
 <div style="margin-top:18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
   <button id="start">Start</button><button id="stop" disabled>Stop</button><span id="status"></span>
 </div></div>
+<div class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+  <div style="flex:1;min-width:240px"><label class="h" style="margin:0">Numbers we already have: <span id="nKnown">0</span></label>
+    <div class="hint">Upload a spreadsheet (Excel .xlsx or .csv) or a text file. Every phone number in it gets added, and sellers with those numbers are rejected. This list stays on this computer only.</div></div>
+  <input type="file" id="knownFile" accept=".csv,.txt,.xlsx" style="display:none">
+  <button class="dl" onclick="document.getElementById('knownFile').click()">Upload numbers</button>
+  <span id="knownMsg" class="hint" style="margin:0"></span>
+</div>
 <div class="card"><label class="h">What it's doing</label><div id="log"></div></div>
 <div class="card">
   <div class="tabs">
@@ -543,6 +613,14 @@ document.getElementById("quit").onclick=async()=>{
   await fetch("/quit",{method:"POST"});
   document.body.innerHTML='<div class="wrap"><h1>The app is off.</h1><p>You can close this tab. Double-click the Walmart Seller Finder icon to start it again.</p></div>';
 };
+document.getElementById("knownFile").onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  const msg=document.getElementById("knownMsg");msg.textContent="Reading "+f.name+"...";
+  const r=await (await fetch("/known/upload?name="+encodeURIComponent(f.name),{method:"POST",body:await f.arrayBuffer()})).json();
+  msg.textContent=r.error||`Found ${r.found} numbers in ${f.name}. ${r.added} were new.`;
+  if(r.total!==undefined)document.getElementById("nKnown").textContent=r.total;
+  e.target.value="";
+};
 function draw(){
   const s=data.sellers;
   for(const [k,id] of [["Good","nGood"],["Rejected","nRejected"],["Checking...","nChecking"]])
@@ -563,6 +641,7 @@ async function poll(){
   document.getElementById("status").textContent=data.running?"Running... (Chrome works minimized in the Dock and only pops up if Walmart needs you to press & hold)":(data.saved_file?"Last results saved to "+data.saved_file:"");
   const log=document.getElementById("log"),atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-5;
   log.textContent=data.log.join("\n");if(atBottom)log.scrollTop=log.scrollHeight;
+  document.getElementById("nKnown").textContent=data.known_count;
   document.getElementById("update").style.display=data.update_available?"flex":"none";
   draw();
   setTimeout(poll,data.running?2000:30000);
@@ -593,7 +672,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps([{"id": r["id"], "label": r["label"]} for r in RULES]))
         elif url.path == "/status":
             with LOCK:
-                self.send(json.dumps({k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available")}, default=str))
+                status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available")}
+                status["known_count"] = len(KNOWN)
+                self.send(json.dumps(status, default=str))
         elif url.path == "/download":
             which = parse_qs(url.query).get("which", ["good"])[0]
             with LOCK:
@@ -606,7 +687,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length)
+        url = urlparse(self.path)
+        if url.path == "/known/upload":
+            name = parse_qs(url.query).get("name", [""])[0]
+            if not name.lower().endswith((".xlsx", ".csv", ".txt")):
+                return self.send(json.dumps({"error": "Please save the file as Excel (.xlsx) or CSV first, then upload that."}))
+            try:
+                found = phones_in_file(name, raw)
+            except Exception:
+                return self.send(json.dumps({"error": "Couldn't read that file. Try saving it as CSV and uploading again."}))
+            added = add_known(found)
+            log(f"Uploaded {name}: {len(found)} numbers found, {added} new")
+            return self.send(json.dumps({"found": len(found), "added": added, "total": len(KNOWN)}))
+        body = json.loads(raw or b"{}")
         if self.path == "/start":
             with LOCK:
                 if STATE["running"]:
