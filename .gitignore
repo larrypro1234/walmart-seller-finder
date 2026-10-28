@@ -1,0 +1,5 @@
+browser-profile/
+*.csv
+app.log
+app.py.new
+__pycache__/
