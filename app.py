@@ -18,12 +18,14 @@ import json
 import os
 import random
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import webbrowser
 import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 8
+VERSION = 9
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -193,10 +195,14 @@ def rule_store_categories(s):
     return None
 
 
-# Numbers we already have. Kept only on this computer (known_numbers.txt next to
-# app.py), never on GitHub. Good sellers found by the app are added automatically.
-KNOWN_FILE = HERE / "known_numbers.txt"
+# Numbers we already have. Kept only on this computer in numbers.db (a small
+# database next to app.py), never on GitHub. Each number remembers the rest of the
+# spreadsheet row it came from, which file, and when. Good sellers found by the app
+# are added automatically.
+DB_FILE = HERE / "numbers.db"
+OLD_KNOWN_FILE = HERE / "known_numbers.txt"  # versions 7-8 kept bare numbers here
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)")
+DB_LOCK = threading.Lock()
 
 
 def normalize_phone(p):
@@ -206,35 +212,129 @@ def normalize_phone(p):
     return digits if len(digits) == 10 else ""
 
 
+def pretty_phone(p):
+    return f"({p[:3]}) {p[3:6]}-{p[6:]}" if len(p) == 10 else p
+
+
+def db():
+    con = sqlite3.connect(str(DB_FILE))
+    con.execute("CREATE TABLE IF NOT EXISTS numbers (phone TEXT PRIMARY KEY, details TEXT NOT NULL DEFAULT '', "
+                "source TEXT NOT NULL DEFAULT '', added TEXT NOT NULL DEFAULT '')")
+    return con
+
+
+def add_known(entries, source):
+    """entries: (phone, details) pairs. Returns how many numbers were new."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = {}
+    for phone, details in entries:
+        if phone and (phone not in rows or not rows[phone]):
+            rows[phone] = details or ""
+    new = [p for p in rows if p not in KNOWN]
+    with DB_LOCK:
+        con = db()
+        with con:
+            con.executemany(
+                "INSERT INTO numbers (phone, details, source, added) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(phone) DO UPDATE SET details = CASE WHEN numbers.details = '' "
+                "THEN excluded.details ELSE numbers.details END",
+                [(p, d, source, today) for p, d in rows.items()])
+        con.close()
+        KNOWN.update(rows)
+    return len(new)
+
+
 def load_known():
-    try:
-        return {l.strip() for l in KNOWN_FILE.read_text().splitlines() if l.strip()}
-    except FileNotFoundError:
-        return set()
+    con = db()
+    known = {r[0] for r in con.execute("SELECT phone FROM numbers")}
+    con.close()
+    return known
 
 
 KNOWN = load_known()
 RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
 
+if not KNOWN and OLD_KNOWN_FILE.exists():  # move numbers over from versions 7-8
+    add_known([(l.strip(), "") for l in OLD_KNOWN_FILE.read_text().splitlines() if l.strip()], "Earlier upload")
 
-def add_known(numbers):
-    new = {n for n in numbers if n and n not in KNOWN}
-    if new:
-        KNOWN.update(new)
-        KNOWN_FILE.write_text("\n".join(sorted(KNOWN)) + "\n")
-    return len(new)
+
+def lookup(q, limit=50):
+    q = (q or "").strip()
+    digits = re.sub(r"\D", "", q)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) >= 3 and not re.search(r"[A-Za-z]", q):
+        where, arg = "phone LIKE ?", f"%{digits}%"
+    elif len(q) >= 2:
+        where, arg = "details LIKE ? OR source LIKE ?", f"%{q}%"
+    else:
+        return {"total": 0, "rows": []}
+    con = db()
+    total = con.execute(f"SELECT COUNT(*) FROM numbers WHERE {where}", (arg,) * where.count("?")).fetchone()[0]
+    rows = con.execute(f"SELECT phone, details, source, added FROM numbers WHERE {where} ORDER BY phone LIMIT {limit}",
+                       (arg,) * where.count("?")).fetchall()
+    con.close()
+    return {"total": total, "rows": [{"phone": pretty_phone(p), "details": d, "source": s, "added": a}
+                                     for p, d, s, a in rows]}
+
+
+XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def xlsx_rows(raw):
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        names = z.namelist()
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(XL + "si"):
+                shared.append("".join(t.text or "" for t in si.iter(XL + "t")))
+        for n in sorted(n for n in names if n.startswith("xl/worksheets/sheet")):
+            for r in ET.fromstring(z.read(n)).iter(XL + "row"):
+                cells = []
+                for c in r.iter(XL + "c"):
+                    v = c.find(XL + "v")
+                    if c.get("t") == "s" and v is not None:
+                        cells.append(shared[int(v.text)])
+                    elif c.get("t") == "inlineStr":
+                        cells.append("".join(t.text or "" for t in c.iter(XL + "t")))
+                    elif v is not None and v.text:
+                        val = v.text
+                        if re.fullmatch(r"[\d.]+(E\+?\d+)?", val, re.I):  # 9175921495.0 or 9.175921495E9
+                            try:
+                                f = float(val)
+                                val = str(int(f)) if f == int(f) else val
+                            except ValueError:
+                                pass
+                        cells.append(val)
+                yield cells
 
 
 def phones_in_file(name, raw):
-    """Every phone number in an uploaded .xlsx, .csv or .txt file, whatever column it's in."""
+    """(phone, details) for every phone number in an uploaded .xlsx, .csv or .txt file,
+    whatever column it's in. details is the rest of that row, labelled by the header row."""
     if name.lower().endswith(".xlsx"):
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
-            text = " ".join(z.read(n).decode("utf-8", "ignore") for n in z.namelist()
-                            if n.startswith(("xl/sharedStrings", "xl/worksheets/")))
-        text = re.sub(r"<[^>]+>", " ", text)
+        rows = xlsx_rows(raw)
+    elif name.lower().endswith(".csv"):
+        rows = csv.reader(io.StringIO(raw.decode("utf-8-sig", "ignore")))
     else:
-        text = raw.decode("utf-8", "ignore")
-    return {normalize_phone(m) for m in PHONE_RE.findall(text)} - {""}
+        rows = ([line] for line in raw.decode("utf-8", "ignore").splitlines())
+    found, header = [], None
+    for i, cells in enumerate(rows):
+        cells = [str(c).strip() for c in cells]
+        phones = [normalize_phone(m) for c in cells for m in PHONE_RE.findall(c)]
+        phones = [p for p in phones if p]
+        if not phones:
+            if i == 0:
+                header = cells
+            continue
+        parts = []
+        for j, c in enumerate(cells):
+            if c and not PHONE_RE.fullmatch(c):
+                label = header[j] if header and j < len(header) and header[j] else ""
+                parts.append(f"{label}: {c}" if label else c)
+        details = " · ".join(parts)[:400]
+        found.extend((p, details) for p in phones)
+    return found
 
 
 def rule_no_duplicate_phone(s):
@@ -586,7 +686,8 @@ def run_scrape(keywords, pages, active_rules, delay):
             phone = normalize_phone(rec.get("phone"))
             if rec["status"] == "Good" and phone:
                 RUN_PHONES[phone] = rec["seller_name"]
-                add_known([phone])
+                add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],
+                          "Found by app")
             publish(sellers)
 
         save_csv(sellers)
@@ -690,6 +791,12 @@ a{color:var(--blue)}
   <input type="file" id="knownFile" accept=".csv,.txt,.xlsx" style="display:none">
   <button class="dl" onclick="document.getElementById('knownFile').click()">Upload numbers</button>
   <span id="knownMsg" class="hint" style="margin:0"></span>
+  <div style="flex-basis:100%;margin-top:6px">
+    <label class="h" for="lookup">Look up a number or name</label>
+    <input id="lookup" type="search" placeholder="Type a phone number (any format) or a company name" autocomplete="off"
+      style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
+    <div id="lookupOut" style="margin-top:10px"></div>
+  </div>
 </div>
 <div class="card"><label class="h">What it's doing</label><div id="log"></div></div>
 <div class="card">
@@ -734,12 +841,26 @@ document.getElementById("quit").onclick=async()=>{
   await fetch("/quit",{method:"POST"});
   document.body.innerHTML='<div class="wrap"><h1>The app is off.</h1><p>You can close this tab. Double-click the Walmart Seller Finder icon to start it again.</p></div>';
 };
+let lookupTimer;
+document.getElementById("lookup").oninput=e=>{
+  clearTimeout(lookupTimer);
+  lookupTimer=setTimeout(async()=>{
+    const q=e.target.value.trim(),out=document.getElementById("lookupOut");
+    if(q.length<2){out.innerHTML="";return;}
+    const r=await (await fetch("/lookup?q="+encodeURIComponent(q))).json();
+    if(!r.total){out.innerHTML=`<div class="good" style="color:var(--muted)">Not in our numbers. We don't have this one yet.</div>`;return;}
+    out.innerHTML=`<div class="bad" style="margin-bottom:6px">We already have ${r.total===1?"this number":r.total+" matches"}${r.total>r.rows.length?` (showing first ${r.rows.length})`:""}</div>
+      <div class="tablewrap"><table><thead><tr><th>Phone</th><th>Details</th><th>Where it came from</th><th>Added</th></tr></thead><tbody>`+
+      r.rows.map(x=>`<tr><td style="white-space:nowrap"><b>${esc(x.phone)}</b></td><td>${esc(x.details)}</td><td>${esc(x.source)}</td><td style="white-space:nowrap">${esc(x.added)}</td></tr>`).join("")+
+      `</tbody></table></div>`;
+  },250);
+};
 document.getElementById("knownFile").onchange=async e=>{
   const f=e.target.files[0];if(!f)return;
   const msg=document.getElementById("knownMsg");msg.textContent="Reading "+f.name+"...";
   const r=await (await fetch("/known/upload?name="+encodeURIComponent(f.name),{method:"POST",body:await f.arrayBuffer()})).json();
   msg.textContent=r.error||`Found ${r.found} numbers in ${f.name}. ${r.added} were new.`;
-  if(r.total!==undefined)document.getElementById("nKnown").textContent=r.total;
+  if(r.total!==undefined)document.getElementById("nKnown").textContent=r.total.toLocaleString();
   e.target.value="";
 };
 function draw(){
@@ -762,7 +883,7 @@ async function poll(){
   document.getElementById("status").textContent=data.running?"Running... (Chrome works minimized in the Dock and only pops up if Walmart needs you to press & hold)":(data.saved_file?"Last results saved to "+data.saved_file:"");
   const log=document.getElementById("log"),atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-5;
   log.textContent=data.log.join("\n");if(atBottom)log.scrollTop=log.scrollHeight;
-  document.getElementById("nKnown").textContent=data.known_count;
+  document.getElementById("nKnown").textContent=(data.known_count||0).toLocaleString();
   document.getElementById("update").style.display=data.update_available?"flex":"none";
   draw();
   setTimeout(poll,data.running?2000:30000);
@@ -796,6 +917,8 @@ class Handler(BaseHTTPRequestHandler):
                 status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available")}
                 status["known_count"] = len(KNOWN)
                 self.send(json.dumps(status, default=str))
+        elif url.path == "/lookup":
+            self.send(json.dumps(lookup(parse_qs(url.query).get("q", [""])[0])))
         elif url.path == "/download":
             which = parse_qs(url.query).get("which", ["good"])[0]
             with LOCK:
@@ -818,9 +941,10 @@ class Handler(BaseHTTPRequestHandler):
                 found = phones_in_file(name, raw)
             except Exception:
                 return self.send(json.dumps({"error": "Couldn't read that file. Try saving it as CSV and uploading again."}))
-            added = add_known(found)
-            log(f"Uploaded {name}: {len(found)} numbers found, {added} new")
-            return self.send(json.dumps({"found": len(found), "added": added, "total": len(KNOWN)}))
+            added = add_known(found, f"Uploaded: {name}")
+            unique = len({p for p, _ in found})
+            log(f"Uploaded {name}: {unique} numbers found, {added} new")
+            return self.send(json.dumps({"found": unique, "added": added, "total": len(KNOWN)}))
         body = json.loads(raw or b"{}")
         if self.path == "/start":
             with LOCK:

@@ -8,9 +8,11 @@ A small app that searches Walmart.com and finds third-party Marketplace sellers,
 - **Skip numbers we already have**: rejected if the seller's phone is in your numbers list, or another seller in the same search already has it.
 
 ## Numbers we already have
-Click **Upload numbers** in the app and pick an Excel (.xlsx), CSV or text file. Every phone number in it is added to `known_numbers.txt` next to `app.py`. Good sellers the app finds are added automatically. This list stays on your computer and is never uploaded to GitHub.
+Click **Upload numbers** in the app and pick an Excel (.xlsx), CSV or text file. Every phone number in it is saved to `numbers.db` (a small database next to `app.py`) together with the rest of its spreadsheet row, the file it came from, and the date. Good sellers the app finds are added automatically.
 
-New rules go in the `RULES` list in `app.py` and show up as checkboxes automatically.
+Use **Look up a number or name** in the app to search it: any phone format, part of a number, or words like a company or setter name.
+
+This database stays on your computer and is never uploaded to GitHub.
 
 ## Running it (Mac)
 Double-click the **Walmart Seller Finder** icon on the Desktop. The app opens in your browser.
