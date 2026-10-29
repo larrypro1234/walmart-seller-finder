@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 17
+VERSION = 18
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -596,14 +596,58 @@ def search_url(term):
     return f"{BASE}/search?q={quote_plus(term)}"
 
 
+def money(x):
+    return f"${x:,.2f}".replace(".00", "")
+
+
+def band_entry(kw, lo, hi):
+    label = f"{kw} ({money(lo)}-{money(hi)})" if hi < 100000 else f"{kw} ({money(lo)}+)"
+    return {"label": label, "url": f"{search_url(kw)}&min_price={lo:g}&max_price={hi:g}", "kw": kw, "band": (lo, hi)}
+
+
+def split_band(lo, hi):
+    """Two smaller price ranges, or None when the range is already under a dollar wide."""
+    if hi - lo < 1:
+        return None
+    mid = round((lo * hi) ** 0.5, 2) if lo > 0 and hi > 4 * lo else round((lo + hi) / 2, 2)
+    return (lo, mid), (mid, hi)
+
+
 def search_plan(kw, every_corner):
-    """(label, url, is_price_band) for each search to run for one search word."""
+    """The searches to run for one search word: {label, url, kw, band}."""
     if not every_corner:
-        return [(kw, search_url(kw), False)]
-    plan = [(f"{kw} (${lo}-${hi})" if hi < 100000 else f"{kw} (${lo}+)",
-             f"{search_url(kw)}&min_price={lo}&max_price={hi}", True) for lo, hi in PRICE_BANDS]
-    plan += [(t, search_url(t), False) for t in RELATED_TERMS.get(kw.strip().lower(), [])]
+        return [{"label": kw, "url": search_url(kw), "kw": kw, "band": None}]
+    plan = [band_entry(kw, lo, hi) for lo, hi in PRICE_BANDS]
+    plan += [{"label": t, "url": search_url(t), "kw": t, "band": None} for t in RELATED_TERMS.get(kw.strip().lower(), [])]
     return plan
+
+
+# "Find hidden sellers": search results show one seller per product, but many products are
+# sold by several sellers. Each product's "all sellers" page lists the rest.
+OFFER_COUNT_KEY = re.compile(r"^(additional)?offers?count$|^numberofoffers$|^sellercount$|^totaloffers$", re.I)
+
+
+def offer_signal(d):
+    """How many sellers a search result says the product has, or None if it doesn't say."""
+    for k, v in d.items():
+        if OFFER_COUNT_KEY.match(k) and isinstance(v, (int, float)):
+            return int(v) + (1 if k.lower().startswith("additional") else 0)
+    return None
+
+
+def parse_offers(data, pid):
+    """Third-party sellers of product pid on its product or all-sellers page. Entries that belong
+    to a different product (like "similar items" on the page) are skipped."""
+    found = {}
+    for d in walk(data):
+        if d.get("usItemId") and str(d["usItemId"]) != pid:
+            continue
+        name = d.get("sellerName") or d.get("sellerDisplayName")
+        sid = str(d.get("catalogSellerId") or d.get("sellerId") or "")
+        if not name or not sid or name.strip().lower() in WALMART_FIRST_PARTY or sid in WALMART_FIRST_PARTY_IDS:
+            continue
+        found[name.strip().lower()] = {"seller_name": name.strip(), "catalog_seller_id": str(d.get("catalogSellerId") or "")}
+    return list(found.values())
 
 
 # ========================================================= PAGE PARSING
@@ -877,7 +921,56 @@ class Browser:
             pass
 
 
-def run_scrape(keywords, pages, active_rules, delay, every_corner=False):
+def add_found_seller(sellers, name, catalog_id, kw, found_from, found_from_url, item_id, item_text):
+    """Add a seller to this search's list (or note another product of theirs). Returns 1 if new."""
+    key = name.lower()
+    new = key not in sellers
+    if new:
+        sellers[key] = {"seller_name": name, "catalog_seller_id": "", "keywords": set(), "products": {},
+                        "sample_product_url": found_from_url, "status": "Checking...",
+                        "found_from": found_from, "found_from_url": found_from_url}
+    rec = sellers[key]
+    if str(catalog_id).isdigit():
+        rec["catalog_seller_id"] = str(catalog_id)
+    rec["keywords"].add(kw)
+    if item_id:
+        rec["products"][item_id] = item_text
+    return int(new)
+
+
+def find_hidden_sellers(br, products, sellers):
+    with_signal = [pid for pid, p in products.items() if p["signal"] is not None]
+    if with_signal:  # Walmart says which products have more than one seller: only open those
+        todo = [pid for pid in with_signal if products[pid]["signal"] > 1]
+        log(f"Finding hidden sellers: {len(todo)} of {len(products)} products have more than one seller")
+    else:
+        todo = list(products)
+        log(f"Finding hidden sellers: checking all {len(todo)} products")
+    found_any = False
+    for n, pid in enumerate(todo, 1):
+        if STATE["stop"]:
+            break
+        p = products[pid]
+        log(f"More sellers {n}/{len(todo)}: {p['name'][:60]}")
+        html = br.get(f"{BASE}/product/{pid}/sellers")
+        data = next_data(html) if html else None
+        if not data:
+            html = br.get(p["url"])
+            data = next_data(html) if html else None
+        offers = parse_offers(data, pid) if data else []
+        found_any = found_any or bool(offers)
+        new = sum(add_found_seller(sellers, o["seller_name"], o["catalog_seller_id"], p["kw"],
+                                   f'"{p["label"]}" more sellers on: {p["name"]}', p["url"], pid, p["name"])
+                  for o in offers)
+        if new:
+            log(f"  found {new} hidden sellers ({len(sellers)} total)")
+            publish(sellers)
+        if n == 10 and not found_any:
+            log("  Couldn't find Walmart's all-sellers lists on these pages, so skipping hidden sellers")
+            break
+
+
+def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_sellers=False):
     sellers = {}
     RUN_PHONES.clear()
     searched = []  # search words that actually ran, for the search history
@@ -886,60 +979,71 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False):
     try:
         br = Browser(delay)
         # Step 1: find sellers in search results.
+        products = {}  # every product seen: id -> {name, url, kw, label, sellers}
         for kw in keywords:
             if STATE["stop"]:
                 break
             searched.append(kw)
             plan = search_plan(kw, every_corner)
             if every_corner:
-                log(f'Searching every corner of "{kw}": {len(plan)} searches')
-            first_ids = None  # first-page products of the first price band, to spot ignored price filters
+                log(f'Searching every corner of "{kw}": {len(plan)} searches to start with')
+            first_ids = None  # first-page products of the first price range, to spot an ignored price filter
             skip_bands = False
-            for label, url, is_price_band in plan:
-                if STATE["stop"]:
-                    break
-                if is_price_band and skip_bands:
+            i = 0
+            while i < len(plan) and not STATE["stop"]:
+                entry = plan[i]
+                i += 1
+                label, band = entry["label"], entry["band"]
+                if band and skip_bands:
                     continue
+                pages_with_results, last_page = 0, None
                 for page in range(1, pages + 1):
                     if STATE["stop"]:
                         break
                     log(f'Searching "{label}" - page {page}')
-                    html = br.get(f"{url}&page={page}")
+                    html = br.get(f"{entry['url']}&page={page}")
                     data = next_data(html) if html else None
                     # Stop when Walmart runs out of products (not just out of third-party sellers:
                     # a page can be all Walmart's own items and the next page still have sellers).
-                    ids = {str(d["usItemId"]) for d in walk(data) if d.get("usItemId") and d.get("name")} if data else set()
+                    items = [d for d in walk(data) if d.get("usItemId") and d.get("name")] if data else []
+                    ids = {str(d["usItemId"]) for d in items}
                     if not ids:
                         log(f'  no more results for "{label}"' if html else f"  couldn't load page {page}, moving on")
                         break
-                    if is_price_band and page == 1:
+                    if band and page == 1:
                         if first_ids is not None and ids == first_ids:
                             log("  Walmart ignored the price filter, so skipping the other price ranges")
                             skip_bands = True
                             break
                         first_ids = first_ids if first_ids is not None else ids
+                    pages_with_results += 1
                     last_page = first(data, "maxPage")
+                    for d in items:
+                        products.setdefault(str(d["usItemId"]), {
+                            "name": d.get("name") or "", "kw": kw, "label": label, "signal": offer_signal(d),
+                            "url": BASE + d["canonicalUrl"] if d.get("canonicalUrl") else f"{BASE}/ip/{d['usItemId']}"})
                     new = 0
                     for h in parse_search(data):
-                        key = h["seller_name"].lower()
-                        if key not in sellers:
-                            new += 1
-                            sellers[key] = {
-                                "seller_name": h["seller_name"], "catalog_seller_id": "",
-                                "keywords": set(), "products": {},
-                                "sample_product_url": h["product_url"], "status": "Checking...",
-                                "found_from": f'"{label}" search: {h["product"]}', "found_from_url": h["product_url"],
-                            }
-                        rec = sellers[key]
-                        if h["catalog_seller_id"].isdigit():
-                            rec["catalog_seller_id"] = h["catalog_seller_id"]
-                        rec["keywords"].add(kw)
-                        rec["products"][h["item_id"]] = h["item_text"]
+                        new += add_found_seller(sellers, h["seller_name"], h["catalog_seller_id"], kw,
+                                                f'"{label}" search: {h["product"]}', h["product_url"],
+                                                h["item_id"], h["item_text"])
                     log(f"  found {new} new sellers ({len(sellers)} total)")
                     publish(sellers)
                     if str(last_page).isdigit() and page >= int(last_page):
                         log(f'  that was the last page for "{label}"')
                         break
+                # Hit Walmart's page limit inside a price range? Split it so nothing is cut off.
+                capped = pages == MAX_PAGES and pages_with_results == MAX_PAGES and not (
+                    str(last_page).isdigit() and int(last_page) < MAX_PAGES)
+                if band and capped and not skip_bands:
+                    halves = split_band(*band)
+                    if halves:
+                        log(f'  "{label}" has more than {MAX_PAGES} pages, so splitting it into smaller price ranges')
+                        plan[i:i] = [band_entry(entry["kw"], lo, hi) for lo, hi in halves]
+
+        # Step 1b: open each product's all-sellers list to find sellers search doesn't show.
+        if hidden_sellers and products and not STATE["stop"]:
+            find_hidden_sellers(br, products, sellers)
 
         # Step 2: open each seller's page, get their details, apply the rules.
         for i, rec in enumerate(list(sellers.values()), 1):
@@ -1166,6 +1270,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
       </select>
       <label class="check" style="align-items:flex-start;margin-top:12px"><input type="checkbox" id="everyCorner" style="margin-top:4px">
         <span><b>Search every corner</b><br><span class="muted">Splits each search by price and also searches related terms (like "lego star wars"), so it finds far more sellers. Takes much longer: use it with "All pages".</span></span></label>
+      <label class="check" style="align-items:flex-start"><input type="checkbox" id="hiddenSellers" style="margin-top:4px">
+        <span><b>Find hidden sellers</b><br><span class="muted">Many products are sold by several sellers, but search only shows one. This opens each product's "more sellers" list. Finds many more sellers, but much slower.</span></span></label>
       <h3 style="margin-top:16px">3. Rules</h3>
       <div id="rules"></div>
     </div>
@@ -1284,7 +1390,7 @@ $("start").onclick=async()=>{
   const keywords=words();
   if(!keywords.length){alert("Type at least one thing to search for, or click a brand.");return;}
   const rules=[...document.querySelectorAll("#rules input:checked")].map(i=>i.value);
-  await fetch("/start",{method:"POST",body:JSON.stringify({keywords,rules,pages:+$("pages").value,every_corner:$("everyCorner").checked})});
+  await fetch("/start",{method:"POST",body:JSON.stringify({keywords,rules,pages:+$("pages").value,every_corner:$("everyCorner").checked,hidden_sellers:$("hiddenSellers").checked})});
   resView="Good";document.querySelectorAll("[data-r]").forEach(x=>x.classList.toggle("on",x.dataset.r==="Good"));
   poll();
 };
@@ -1474,7 +1580,8 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.update(running=True, stop=False, log=[], sellers=[], saved_file="")
             pages = max(1, min(MAX_PAGES, int(body.get("pages") or 3)))
             threading.Thread(target=run_scrape, daemon=True,
-                             args=(body["keywords"], pages, set(body.get("rules", [])), 2.0, bool(body.get("every_corner")))).start()
+                             args=(body["keywords"], pages, set(body.get("rules", [])), 2.0, bool(body.get("every_corner")),
+                                   bool(body.get("hidden_sellers")))).start()
             self.send('{"ok":true}')
         elif self.path == "/leads/mark":
             mark_leads(body.get("keys", []), "added" if body.get("status") == "added" else "new")
