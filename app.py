@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 9
+VERSION = 10
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -411,6 +411,7 @@ def parse_search(data):
             "catalog_seller_id": str(d.get("catalogSellerId") or ""),
             "item_id": str(d["usItemId"]),
             "item_text": item_text(d),
+            "product": (d.get("name") or "") + (" (sponsored)" if d.get("isSponsoredFlag") or d.get("sponsoredProduct") else ""),
             "product_url": BASE + d["canonicalUrl"] if d.get("canonicalUrl") else f"{BASE}/ip/{d['usItemId']}",
         })
     return found
@@ -651,6 +652,7 @@ def run_scrape(keywords, pages, active_rules, delay):
                             "seller_name": h["seller_name"], "catalog_seller_id": "",
                             "keywords": set(), "products": {},
                             "sample_product_url": h["product_url"], "status": "Checking...",
+                            "found_from": f'"{kw}" search: {h["product"]}', "found_from_url": h["product_url"],
                         }
                     rec = sellers[key]
                     if h["catalog_seller_id"].isdigit():
@@ -705,7 +707,8 @@ def run_scrape(keywords, pages, active_rules, delay):
 
 
 COLUMNS = ["status", "reason", "seller_name", "business_name", "phone", "email", "address", "country",
-           "rating", "review_count", "seller_url", "catalog_seller_id", "products_checked", "store_mix", "keywords"]
+           "rating", "review_count", "seller_url", "catalog_seller_id", "products_checked", "store_mix", "keywords",
+           "found_from", "found_from_url"]
 
 
 def row(rec):
@@ -869,7 +872,7 @@ function draw(){
     document.getElementById(id).textContent=s.filter(x=>x.status===k).length;
   const list=s.filter(x=>x.status===tab);
   document.getElementById("rows").innerHTML=list.length?list.map(x=>`<tr>
-    <td><b>${esc(x.seller_name)}</b>${x.business_name&&x.business_name!==x.seller_name?`<br><span class="hint">${esc(x.business_name)}</span>`:""}${x.store_mix?`<br><span class="hint">Sells: ${esc(x.store_mix)}</span>`:""}</td>
+    <td><b>${esc(x.seller_name)}</b>${x.business_name&&x.business_name!==x.seller_name?`<br><span class="hint">${esc(x.business_name)}</span>`:""}${x.store_mix?`<br><span class="hint">Sells: ${esc(x.store_mix)}</span>`:""}${x.found_from?`<br><span class="hint">Found from: <a href="${esc(x.found_from_url)}" target="_blank">${esc(x.found_from)}</a></span>`:""}</td>
     <td>${esc(x.phone)}</td><td>${esc(x.email)}</td><td>${esc(x.address)}</td>
     <td>${x.rating?esc((+x.rating).toFixed?.(1)??x.rating):""}${x.review_count?` <span class="hint">(${esc(x.review_count)})</span>`:""}</td>
     <td>${x.seller_url?`<a href="${esc(x.seller_url)}" target="_blank">Open</a>`:""}</td>
