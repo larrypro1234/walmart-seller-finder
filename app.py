@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 14
+VERSION = 15
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -548,6 +548,27 @@ RULES = [
 ]
 
 
+# Brand ideas shown in the app's Search tab, grouped by the categories we buy.
+BRAND_IDEAS = {
+    "Toys & Games": ["LEGO", "Hasbro", "Mattel", "Barbie", "Hot Wheels", "Fisher-Price", "Nerf", "Play-Doh",
+                     "Melissa & Doug", "Crayola", "Funko", "Squishmallows", "VTech", "Little Tikes", "Magna-Tiles",
+                     "Board games", "Puzzles"],
+    "Health & Beauty": ["CeraVe", "Neutrogena", "L'Oreal", "Maybelline", "Revlon", "Olay", "Cetaphil", "Aveeno",
+                        "e.l.f.", "La Roche-Posay", "Burt's Bees", "NYX"],
+    "OTC": ["Tylenol", "Advil", "Motrin", "Aleve", "Zyrtec", "Claritin", "Allegra", "Benadryl", "Mucinex",
+            "Pepto-Bismol", "Tums", "Flonase"],
+    "Personal Care": ["Dove", "Crest", "Colgate", "Oral-B", "Gillette", "Old Spice", "Head & Shoulders", "Pantene",
+                      "Degree", "Secret", "Listerine", "Schick"],
+    "Household Essentials": ["Tide", "Dawn", "Lysol", "Clorox", "Bounty", "Charmin", "Cascade", "Downy", "Gain",
+                             "Febreze", "Swiffer", "Glad", "Ziploc", "Mr. Clean"],
+    "Baby": ["Pampers", "Huggies", "Similac", "Enfamil", "Johnson's Baby", "Gerber", "Dr. Brown's", "Philips Avent",
+             "Desitin", "Aquaphor Baby"],
+    "Supplements": ["Nature Made", "Garden of Life", "Centrum", "One A Day", "Vitafusion", "Olly", "Nature's Bounty",
+                    "Optimum Nutrition", "Emergen-C", "Airborne"],
+    "Apparel basics": ["Hanes", "Fruit of the Loom", "Jockey", "Gildan socks"],
+}
+
+
 # ========================================================= PAGE PARSING
 
 def next_data(html):
@@ -966,217 +987,353 @@ PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Walmart Seller Finder</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--text:#1d2330;--muted:#6b7280;--line:#e3e6eb;--blue:#0071dc;--green:#1a7f37;--red:#c62828}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.wrap{max-width:1200px;margin:0 auto;padding:24px 16px}
-h1{font-size:24px;margin:0 0 16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
-.grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:20px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
-label.h{display:block;font-weight:600;margin-bottom:6px}
-textarea,input[type=number]{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit}
-textarea{height:110px;resize:vertical}
-.rule{display:flex;gap:8px;align-items:center;margin:6px 0}
-.hint{color:var(--muted);font-size:13px;margin-top:4px}
-button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:12px 22px;cursor:pointer}
-#start{background:var(--blue);color:#fff}#stop{background:#eceff3;color:var(--text)}
-button:disabled{opacity:.45;cursor:default}
-.dl{background:#eceff3;color:var(--text);padding:8px 14px;font-size:14px}
-#status{margin-left:12px;color:var(--muted)}
-#log{background:#11151c;color:#cfd6e0;font:12px/1.5 ui-monospace,Menlo,monospace;height:150px;overflow:auto;border-radius:8px;padding:10px;white-space:pre-wrap}
-.tabs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.tab{background:#eceff3;color:var(--text);padding:8px 14px}.tab.on{background:var(--text);color:#fff}
+:root{--bg:#f4f6f9;--card:#fff;--text:#1b2230;--muted:#667085;--line:#e4e7ec;--soft:#f2f4f7;
+  --blue:#0071dc;--blue-soft:#e8f2fd;--green:#12805c;--green-soft:#e7f6ef;--red:#c4320a;--red-soft:#fdeee9;--amber:#b54708;--amber-soft:#fef4e6}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+header h1{font-size:22px;margin:0}header h1 small{font-size:13px;color:var(--muted);font-weight:500;margin-left:6px}
+button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:9px 16px;cursor:pointer;background:var(--soft);color:var(--text)}
+button:hover{filter:brightness(.97)}button:disabled{opacity:.45;cursor:default}
+.primary{background:var(--blue);color:#fff}.big{font-size:17px;padding:14px 28px}
+.ok{background:var(--green-soft);color:var(--green)}.small{font-size:13px;padding:6px 12px}
+a{color:var(--blue)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:14px}
+h2{font-size:19px;margin:0 0 2px}h3{font-size:15px;margin:0 0 8px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 14px}
+.muted{color:var(--muted);font-size:13px}
+nav{display:flex;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:6px;margin-bottom:14px;overflow-x:auto}
+nav button{flex:1;background:none;padding:11px 10px;white-space:nowrap;color:var(--muted)}
+nav button.on{background:var(--text);color:#fff}
+.badge{display:inline-block;min-width:22px;padding:1px 7px;border-radius:99px;font-size:12px;background:var(--soft);color:var(--text);margin-left:6px}
+nav button.on .badge{background:rgba(255,255,255,.2);color:#fff}
+.badge.hot{background:var(--blue);color:#fff}
+.section{display:none}.section.on{display:block}
+.pills{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.pill{background:var(--soft);padding:7px 14px;font-size:14px}.pill.on{background:var(--blue-soft);color:var(--blue)}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}.bar .grow{flex:1}
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-size:14px}
-th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase}
-.good{color:var(--green);font-weight:600}.bad{color:var(--red);font-weight:600}
-a{color:var(--blue)}
-.empty{color:var(--muted);padding:20px;text-align:center}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.02em;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.name{font-weight:650;font-size:15px}
+.tag{white-space:nowrap;display:inline-block;font-size:12px;padding:2px 8px;border-radius:99px;background:var(--soft);color:var(--muted);margin:3px 4px 0 0}
+.why{color:var(--red);font-size:13px}
+.empty{color:var(--muted);text-align:center;padding:36px 10px}
+textarea,input[type=search],select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;font:inherit;background:#fff}
+textarea{height:120px;resize:vertical}
+.cols{display:grid;grid-template-columns:3fr 2fr;gap:18px}@media(max-width:820px){.cols{grid-template-columns:1fr}}
+.check{display:flex;gap:9px;align-items:center;margin:8px 0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 14px}
+.chip{background:#fff;border:1px solid var(--line);padding:5px 11px;font-size:13px;font-weight:500;border-radius:99px}
+.chip.picked{background:var(--blue);border-color:var(--blue);color:#fff}
+.chip.done{color:var(--muted)}.chip.done::after{content:" ✓"}
+.chip.due{border-color:var(--amber);color:var(--amber)}.chip.due::after{content:" · due"}
+.cat{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.banner{display:none;align-items:center;gap:14px;flex-wrap:wrap;border-radius:14px;padding:14px 18px;margin-bottom:14px}
+.banner.run{background:var(--blue-soft);border:1px solid #b9d7f7}.banner.upd{background:var(--green-soft);border:1px solid #b5e3cd}
+.progress{height:8px;background:#fff;border-radius:99px;overflow:hidden;margin-top:6px;width:100%}
+.progress div{height:100%;background:var(--blue);width:0;transition:width .4s}
+.answer{border-radius:12px;padding:14px 16px;margin-top:12px;font-weight:600}
+.answer.have{background:var(--red-soft);color:var(--red)}.answer.new{background:var(--green-soft);color:var(--green)}
+.stat{font-size:28px;font-weight:700}
+details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px}
+#log{background:#11151c;color:#cfd6e0;font:12px/1.5 ui-monospace,Menlo,monospace;height:160px;overflow:auto;border-radius:10px;padding:10px;white-space:pre-wrap;margin-top:8px}
+.due{color:var(--amber);font-weight:700}
 </style></head><body><div class="wrap">
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-  <h1 style="margin:0">Walmart Seller Finder <span style="font-size:14px;color:var(--muted);font-weight:500">version __VERSION__</span></h1><button id="quit" class="dl">Quit app</button></div>
-<div id="update" class="card" style="display:none;border-color:var(--blue);display:none;align-items:center;gap:12px;flex-wrap:wrap">
-  <b>A new version of the app is ready.</b><button id="updbtn" class="dl" style="background:var(--blue);color:#fff">Update now</button></div>
-<div class="card"><div class="grid">
-  <div><label class="h">What to search for</label>
-    <textarea id="kw" placeholder="One search per line, for example:&#10;lego&#10;shampoo&#10;board games"></textarea></div>
-  <div><label class="h">Pages per search</label>
-    <input id="pages" type="number" min="1" max="25" value="3">
-    <div class="hint">Each page has about 40 products. More pages = more sellers, but slower.</div></div>
-  <div><label class="h">Rules</label><div id="rules"></div></div>
+
+<header><h1>Walmart Seller Finder<small>version __VERSION__</small></h1><button id="quit" class="small" style="white-space:nowrap">Quit app</button></header>
+
+<div id="update" class="banner upd"><b style="flex:1">A new version of the app is ready.</b><button id="updbtn" class="primary">Update now</button></div>
+
+<div id="running" class="banner run">
+  <div style="flex:1;min-width:220px">
+    <b id="runTitle">Searching Walmart...</b>
+    <div class="muted" id="runDetail"></div>
+    <div class="progress"><div id="runBar"></div></div>
+    <div class="muted" style="margin-top:6px">Chrome works minimized in your Dock. If it pops up asking you to "Press &amp; Hold", hold the button and it carries on.</div>
+  </div>
+  <button id="stop">Stop</button>
 </div>
-<div style="margin-top:18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-  <button id="start">Start</button><button id="stop" disabled>Stop</button><span id="status"></span>
-</div></div>
-<div class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-  <div style="flex:1;min-width:240px"><label class="h" style="margin:0">Numbers we already have: <span id="nKnown">0</span></label>
-    <div class="hint">Upload a spreadsheet (Excel .xlsx or .csv) or a text file. Every phone number in it gets added, and sellers with those numbers are rejected. This list stays on this computer only.</div></div>
+
+<nav>
+  <button data-s="leads" class="on">Leads<span class="badge" id="nLeadsNav">0</span></button>
+  <button data-s="search">Search</button>
+  <button data-s="history">History<span class="badge" id="nDueNav" style="display:none">0</span></button>
+  <button data-s="numbers">Numbers<span class="badge" id="nKnownNav">0</span></button>
+</nav>
+
+<!-- ============ LEADS ============ -->
+<section id="s-leads" class="section on"><div class="card">
+  <h2>Leads</h2>
+  <p class="sub">Good sellers from all your searches. They stay here until you mark them as added to a sales rep's queue.</p>
+  <div class="bar">
+    <div class="pills" style="margin:0">
+      <button class="pill on" data-l="new">New <span id="nLeads">0</span></button>
+      <button class="pill" data-l="added">Added to queue <span id="nAdded">0</span></button>
+    </div>
+    <span class="grow"></span>
+    <button id="markAll" class="small">Mark all as added</button>
+    <button class="small" onclick="location='/download?which=leads'" id="dlLeads">Download new leads</button>
+  </div>
+  <div class="tablewrap"><table><thead><tr><th>Seller</th><th>Contact</th><th>Location</th><th>Rating</th><th></th></tr></thead>
+    <tbody id="leadRows"></tbody></table></div>
+</div></section>
+
+<!-- ============ SEARCH ============ -->
+<section id="s-search" class="section">
+<div class="card">
+  <h2>New search</h2>
+  <p class="sub">Type what to search, or click brands below. The app finds the sellers and checks them against your rules.</p>
+  <div class="cols">
+    <div>
+      <h3>1. What to search</h3>
+      <textarea id="kw" placeholder="One per line, for example:&#10;lego&#10;cerave&#10;tide pods"></textarea>
+      <div class="muted" style="margin-top:4px">Tip: brands you've already searched show a ✓. Brands due for another look show "due".</div>
+    </div>
+    <div>
+      <h3>2. How deep</h3>
+      <select id="pages">
+        <option value="1">Quick: 1 page per search (~40 products)</option>
+        <option value="3" selected>Normal: 3 pages per search</option>
+        <option value="5">Deep: 5 pages per search</option>
+        <option value="10">Very deep: 10 pages per search</option>
+      </select>
+      <h3 style="margin-top:16px">3. Rules</h3>
+      <div id="rules"></div>
+    </div>
+  </div>
+  <div style="margin-top:16px"><button id="start" class="primary big">Start search</button></div>
+</div>
+<div class="card">
+  <h2>Brand ideas</h2>
+  <p class="sub">Brands from the categories you buy. Click one to add it to your search.</p>
+  <div id="brands"></div>
+</div>
+<div class="card">
+  <h2>Latest search results</h2>
+  <p class="sub" id="lastInfo">Good sellers from here are also added to Leads automatically.</p>
+  <div class="pills">
+    <button class="pill on" data-r="Good">Good <span id="nGood">0</span></button>
+    <button class="pill" data-r="Rejected">Rejected <span id="nRejected">0</span></button>
+    <button class="pill" data-r="Checking...">Still checking <span id="nChecking">0</span></button>
+    <span style="flex:1"></span>
+    <button class="small" onclick="location='/download?which=all'">Download results</button>
+  </div>
+  <div class="tablewrap"><table><thead><tr><th>Seller</th><th>Contact</th><th>Location</th><th>Rating</th><th id="resLast"></th></tr></thead>
+    <tbody id="resRows"></tbody></table></div>
+  <details><summary>Show what the app is doing (details)</summary><div id="log"></div></details>
+</div>
+</section>
+
+<!-- ============ HISTORY ============ -->
+<section id="s-history" class="section"><div class="card">
+  <h2>Search history</h2>
+  <p class="sub">When to search a word again: <b>1 week</b> if it found 5+ new leads last time, <b>2 weeks</b> if 1–4, <b>1 month</b> if none.</p>
+  <div class="bar"><span class="grow muted" id="dueInfo"></span><button id="searchDue" class="primary small">Search everything that's due</button></div>
+  <div class="tablewrap"><table><thead><tr><th>Search word</th><th>Last searched</th><th>New leads last time</th><th>New leads ever</th><th>Search again</th><th></th></tr></thead>
+    <tbody id="history"></tbody></table></div>
+</div></section>
+
+<!-- ============ NUMBERS ============ -->
+<section id="s-numbers" class="section">
+<div class="card">
+  <h2>Look up a number</h2>
+  <p class="sub">Type a phone number (any format) or a company name to see if we already have it.</p>
+  <input id="lookup" type="search" placeholder="e.g. (917) 592-1495 or Toy Depot" autocomplete="off">
+  <div id="lookupOut"></div>
+</div>
+<div class="card">
+  <h2>Numbers we already have</h2>
+  <div class="stat" id="nKnown">0</div>
+  <p class="sub">Sellers with these numbers are skipped. Good and rejected sellers the app finds are added automatically. This list stays on this computer only.</p>
   <input type="file" id="knownFile" accept=".csv,.txt,.xlsx" style="display:none">
-  <button class="dl" onclick="document.getElementById('knownFile').click()">Upload numbers</button>
-  <span id="knownMsg" class="hint" style="margin:0"></span>
-  <div style="flex-basis:100%;margin-top:6px">
-    <label class="h" for="lookup">Look up a number or name</label>
-    <input id="lookup" type="search" placeholder="Type a phone number (any format) or a company name" autocomplete="off"
-      style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
-    <div id="lookupOut" style="margin-top:10px"></div>
-  </div>
+  <button class="primary" onclick="document.getElementById('knownFile').click()">Upload more numbers</button>
+  <span id="knownMsg" class="muted" style="margin-left:10px"></span>
+  <div class="muted" style="margin-top:8px">Excel (.xlsx), CSV or text files. Every phone number in the file is added, together with the rest of its row.</div>
 </div>
-<div class="card">
-  <label class="h">Search history</label>
-  <div class="hint" style="margin-bottom:10px">When to check a search word again: 1 week if it found 5+ new leads last time, 2 weeks if 1-4, 1 month if none.</div>
-  <div class="tablewrap"><table><thead><tr>
-    <th>Search word</th><th>Last searched</th><th>Times</th><th>Sellers found</th><th>New leads</th><th>Total new leads</th><th>Check again</th><th></th>
-  </tr></thead><tbody id="history"></tbody></table></div>
+</section>
+
 </div>
-<div class="card"><label class="h">What it's doing</label><div id="log"></div></div>
-<div class="card">
-  <div class="tabs">
-    <button class="tab on" data-t="Leads">New leads (<span id="nLeads">0</span>)</button>
-    <button class="tab" data-t="Added">Added to queue (<span id="nAdded">0</span>)</button>
-    <span class="hint" style="margin:0 4px 0 12px">This search:</span>
-    <button class="tab" data-t="Good">Good (<span id="nGood">0</span>)</button>
-    <button class="tab" data-t="Rejected">Rejected (<span id="nRejected">0</span>)</button>
-    <button class="tab" data-t="Checking...">Still checking (<span id="nChecking">0</span>)</button>
-  </div>
-  <div class="tabs" id="actions">
-    <span class="hint" id="tabHint" style="flex:1;margin:0"></span>
-    <button class="dl" id="markAll" style="display:none">Mark all as added</button>
-    <button class="dl" id="dlLeads" onclick="location='/download?which=leads'">Download new leads</button>
-    <button class="dl" id="dlGood" onclick="location='/download?which=good'" style="display:none">Download good sellers</button>
-    <button class="dl" id="dlAll" onclick="location='/download?which=all'" style="display:none">Download all</button>
-  </div>
-  <div class="tablewrap"><table><thead><tr>
-    <th>Seller</th><th>Phone</th><th>Email</th><th>Address</th><th>Rating</th><th>Store</th><th id="lastCol"></th>
-  </tr></thead><tbody id="rows"></tbody></table></div>
-</div></div>
 <script>
-let tab="Leads", data={sellers:[]}, leads={new:[],added:[]};
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let data={sellers:[],log:[]}, leads={new:[],added:[]}, history=[], brands={}, leadView="new", resView="Good", wasRunning=false;
+
+// ---- navigation
+function show(s){
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.s===s));
+  document.querySelectorAll(".section").forEach(x=>x.classList.toggle("on",x.id==="s-"+s));
+  window.scrollTo(0,0);
+}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>show(b.dataset.s));
+document.querySelectorAll("[data-l]").forEach(b=>b.onclick=()=>{leadView=b.dataset.l;
+  document.querySelectorAll("[data-l]").forEach(x=>x.classList.toggle("on",x===b));drawLeads();});
+document.querySelectorAll("[data-r]").forEach(b=>b.onclick=()=>{resView=b.dataset.r;
+  document.querySelectorAll("[data-r]").forEach(x=>x.classList.toggle("on",x===b));drawResults();});
+
+// ---- shared row pieces
+function sellerCell(x){
+  return `<div class="name">${esc(x.seller_name)}</div>`+
+    (x.business_name&&x.business_name!==x.seller_name?`<div class="muted">${esc(x.business_name)}</div>`:"")+
+    (x.store_mix?`<div>${x.store_mix.split(" · ").map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:"")+
+    (x.found_from?`<div class="muted" style="margin-top:4px">Found from <a href="${esc(x.found_from_url)}" target="_blank">${esc(x.found_from)}</a></div>`:"");
+}
+const fmtPhone=p=>{const d=String(p||"").replace(/\D/g,"").replace(/^1(?=\d{10}$)/,"");return d.length===10?`(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`:p;};
+const contactCell=x=>`<div style="white-space:nowrap"><b>${esc(fmtPhone(x.phone))||'<span class="muted">No phone</span>'}</b></div><div class="muted">${esc(x.email)}</div>`;
+const placeCell=x=>`<div style="max-width:220px">${esc(x.address)}</div>`;
+const ratingCell=x=>x.rating?`<b>${esc((+x.rating).toFixed?.(1)??x.rating)}</b> ★${x.review_count?`<div class="muted">${esc(x.review_count)} reviews</div>`:""}`:`<span class="muted">–</span>`;
+const storeBtn=x=>x.seller_url?`<a href="${esc(x.seller_url)}" target="_blank"><button class="small">Open store</button></a>`:"";
+
+// ---- leads
 async function loadLeads(){
   const [n,a]=await Promise.all(["new","added"].map(st=>fetch("/leads?status="+st).then(r=>r.json())));
-  leads={new:n,added:a};draw();
+  leads={new:n,added:a};drawLeads();
 }
-async function mark(keys,status){
-  await fetch("/leads/mark",{method:"POST",body:JSON.stringify({keys,status})});
-  await loadLeads();
+async function mark(keys,status){await fetch("/leads/mark",{method:"POST",body:JSON.stringify({keys,status})});await loadLeads();}
+function drawLeads(){
+  $("nLeads").textContent=leads.new.length;$("nAdded").textContent=leads.added.length;
+  $("nLeadsNav").textContent=leads.new.length;$("nLeadsNav").classList.toggle("hot",leads.new.length>0);
+  $("markAll").style.display=$("dlLeads").style.display=leadView==="new"&&leads.new.length?"":"none";
+  const list=leads[leadView];
+  $("leadRows").innerHTML=list.length?list.map(x=>`<tr>
+    <td>${sellerCell(x)}</td><td>${contactCell(x)}</td><td>${placeCell(x)}</td><td>${ratingCell(x)}</td>
+    <td style="white-space:nowrap;text-align:right">${storeBtn(x)}
+      ${leadView==="new"?` <button class="ok small" data-key="${esc(x.key)}" data-to="added">Added to queue ✓</button><div class="muted" style="margin-top:6px">Found ${esc(x.found_on)}</div>`
+        :` <button class="small" data-key="${esc(x.key)}" data-to="new">Undo</button><div class="muted" style="margin-top:6px">Added ${esc(x.added_on)}</div>`}</td></tr>`).join("")
+    :`<tr><td colspan="5" class="empty">${leadView==="new"?"No new leads right now. Go to <b>Search</b> to find more.":"Nothing added to a queue yet."}</td></tr>`;
 }
-loadLeads();
-const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+$("leadRows").onclick=e=>{const b=e.target.closest("button[data-key]");if(b)mark([b.dataset.key],b.dataset.to);};
+$("markAll").onclick=()=>{if(leads.new.length&&confirm(`Mark all ${leads.new.length} new leads as added to the queue?`))mark(leads.new.map(x=>x.key),"added");};
+
+// ---- search
 fetch("/rules").then(r=>r.json()).then(rules=>{
-  document.getElementById("rules").innerHTML=rules.map(r=>
-    `<label class="rule"><input type="checkbox" value="${r.id}" checked> ${esc(r.label)}</label>`).join("");
+  $("rules").innerHTML=rules.map(r=>`<label class="check"><input type="checkbox" value="${r.id}" checked> ${esc(r.label)}</label>`).join("");
 });
-document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));b.classList.add("on");tab=b.dataset.t;draw();});
-document.getElementById("start").onclick=async()=>{
-  const keywords=document.getElementById("kw").value.split("\n").map(s=>s.trim()).filter(Boolean);
-  if(!keywords.length){alert("Type at least one thing to search for.");return;}
+const words=()=>$("kw").value.split("\n").map(s=>s.trim()).filter(Boolean);
+function setWords(w){$("kw").value=w.join("\n");drawBrands();}
+$("kw").oninput=()=>drawBrands();
+$("start").onclick=async()=>{
+  const keywords=words();
+  if(!keywords.length){alert("Type at least one thing to search for, or click a brand.");return;}
   const rules=[...document.querySelectorAll("#rules input:checked")].map(i=>i.value);
-  const pages=+document.getElementById("pages").value||3;
-  await fetch("/start",{method:"POST",body:JSON.stringify({keywords,rules,pages})});poll();
+  await fetch("/start",{method:"POST",body:JSON.stringify({keywords,rules,pages:+$("pages").value})});
+  resView="Good";document.querySelectorAll("[data-r]").forEach(x=>x.classList.toggle("on",x.dataset.r==="Good"));
+  poll();
 };
-document.getElementById("stop").onclick=()=>fetch("/stop",{method:"POST"});
-document.getElementById("updbtn").onclick=async()=>{
-  if(data.running){alert("Wait until the search is done (or press Stop) before updating.");return;}
-  await fetch("/update",{method:"POST"});
-  document.getElementById("update").innerHTML="<b>Updating... the page will reload by itself.</b>";
-  const wait=async()=>{try{await fetch("/status");location.reload();}catch(e){setTimeout(wait,1500);}};
-  setTimeout(wait,3000);
+$("stop").onclick=()=>fetch("/stop",{method:"POST"});
+function drawResults(){
+  const s=data.sellers;
+  for(const [k,id] of [["Good","nGood"],["Rejected","nRejected"],["Checking...","nChecking"]])$(id).textContent=s.filter(x=>x.status===k).length;
+  $("resLast").textContent=resView==="Rejected"?"Why rejected":"";
+  const list=s.filter(x=>x.status===resView);
+  $("resRows").innerHTML=list.length?list.map(x=>`<tr>
+    <td>${sellerCell(x)}</td><td>${contactCell(x)}</td><td>${placeCell(x)}</td><td>${ratingCell(x)}</td>
+    <td style="text-align:right">${resView==="Rejected"?`<div class="why" style="text-align:left;max-width:240px">${esc(x.reason)}</div>`:storeBtn(x)}</td></tr>`).join("")
+    :`<tr><td colspan="5" class="empty">Nothing here.</td></tr>`;
+  $("lastInfo").textContent=data.saved_file?`Saved to ${data.saved_file} in your walmart folder. Good sellers are also added to Leads.`:"Good sellers from here are also added to Leads automatically.";
+}
+
+// ---- brand ideas
+fetch("/brands").then(r=>r.json()).then(b=>{brands=b;drawBrands();});
+function drawBrands(){
+  const picked=new Set(words().map(w=>w.toLowerCase())), hist={};
+  history.forEach(h=>hist[h.keyword]=h);
+  $("brands").innerHTML=Object.entries(brands).map(([cat,list])=>`<div class="cat">${esc(cat)}</div><div class="chips">`+
+    list.map(b=>{const k=b.toLowerCase(),h=hist[k];
+      const cls=picked.has(k)?"picked":h?(h.due?"due":"done"):"";
+      return `<button class="chip ${cls}" data-b="${esc(b)}" title="${h?`Last searched ${esc(h.last_run)}`:"Not searched yet"}">${esc(b)}</button>`;}).join("")+`</div>`).join("");
+}
+$("brands").onclick=e=>{
+  const b=e.target.closest("[data-b]");if(!b)return;
+  const w=words(),k=b.dataset.b.toLowerCase(),i=w.findIndex(x=>x.toLowerCase()===k);
+  if(i>=0)w.splice(i,1);else w.push(b.dataset.b);setWords(w);
 };
-document.getElementById("quit").onclick=async()=>{
-  if(!confirm("Turn the app off?"))return;
-  await fetch("/quit",{method:"POST"});
-  document.body.innerHTML='<div class="wrap"><h1>The app is off.</h1><p>You can close this tab. Double-click the Walmart Seller Finder icon to start it again.</p></div>';
-};
+
+// ---- history
+async function loadHistory(){
+  history=await (await fetch("/history")).json();
+  const due=history.filter(h=>h.due);
+  $("nDueNav").textContent=due.length;$("nDueNav").style.display=due.length?"":"none";$("nDueNav").classList.add("hot");
+  $("dueInfo").textContent=due.length?`${due.length} search word${due.length>1?"s are":" is"} due for another look.`:"Nothing is due right now.";
+  $("searchDue").style.display=due.length?"":"none";
+  $("history").innerHTML=history.length?history.map(h=>`<tr>
+    <td class="name">${esc(h.keyword)}</td>
+    <td style="white-space:nowrap">${esc(h.last_run.slice(0,10))}<div class="muted">searched ${h.runs} time${h.runs>1?"s":""}</div></td>
+    <td><b>${h.new_leads}</b> <span class="muted">of ${h.sellers} sellers</span></td>
+    <td>${h.total_new_leads}</td>
+    <td style="white-space:nowrap">${h.due?`<span class="due">Due now</span>`:esc(h.check_again)}</td>
+    <td style="text-align:right"><button class="small" data-kw="${esc(h.keyword)}">Search again</button></td></tr>`).join("")
+    :`<tr><td colspan="6" class="empty">No searches yet.</td></tr>`;
+  drawBrands();
+}
+function addAndGo(list){const w=words();list.forEach(k=>{if(!w.some(x=>x.toLowerCase()===k))w.push(k);});setWords(w);show("search");}
+$("history").onclick=e=>{const b=e.target.closest("button[data-kw]");if(b)addAndGo([b.dataset.kw]);};
+$("searchDue").onclick=()=>addAndGo(history.filter(h=>h.due).map(h=>h.keyword));
+
+// ---- numbers
 let lookupTimer;
-document.getElementById("lookup").oninput=e=>{
+$("lookup").oninput=e=>{
   clearTimeout(lookupTimer);
   lookupTimer=setTimeout(async()=>{
-    const q=e.target.value.trim(),out=document.getElementById("lookupOut");
+    const q=e.target.value.trim(),out=$("lookupOut");
     if(q.length<2){out.innerHTML="";return;}
     const r=await (await fetch("/lookup?q="+encodeURIComponent(q))).json();
-    if(!r.total){out.innerHTML=`<div class="good" style="color:var(--muted)">Not in our numbers. We don't have this one yet.</div>`;return;}
-    out.innerHTML=`<div class="bad" style="margin-bottom:6px">We already have ${r.total===1?"this number":r.total+" matches"}${r.total>r.rows.length?` (showing first ${r.rows.length})`:""}</div>
-      <div class="tablewrap"><table><thead><tr><th>Phone</th><th>Details</th><th>Where it came from</th><th>Added</th></tr></thead><tbody>`+
+    if(!r.total){out.innerHTML=`<div class="answer new">✓ Not in our numbers. We don't have this one yet.</div>`;return;}
+    out.innerHTML=`<div class="answer have">We already have ${r.total===1?"this number":r.total+" matches"}${r.total>r.rows.length?` (showing first ${r.rows.length})`:""}</div>
+      <div class="tablewrap"><table style="margin-top:8px"><thead><tr><th>Phone</th><th>Details</th><th>Where it came from</th><th>Added</th></tr></thead><tbody>`+
       r.rows.map(x=>`<tr><td style="white-space:nowrap"><b>${esc(x.phone)}</b></td><td>${esc(x.details)}</td><td>${esc(x.source)}</td><td style="white-space:nowrap">${esc(x.added)}</td></tr>`).join("")+
       `</tbody></table></div>`;
   },250);
 };
-document.getElementById("knownFile").onchange=async e=>{
+$("knownFile").onchange=async e=>{
   const f=e.target.files[0];if(!f)return;
-  const msg=document.getElementById("knownMsg");msg.textContent="Reading "+f.name+"...";
+  $("knownMsg").textContent="Reading "+f.name+"...";
   const r=await (await fetch("/known/upload?name="+encodeURIComponent(f.name),{method:"POST",body:await f.arrayBuffer()})).json();
-  msg.textContent=r.error||`Found ${r.found} numbers in ${f.name}. ${r.added} were new.`;
-  if(r.total!==undefined)document.getElementById("nKnown").textContent=r.total.toLocaleString();
+  $("knownMsg").textContent=r.error||`Found ${r.found.toLocaleString()} numbers in ${f.name}. ${r.added.toLocaleString()} were new.`;
+  if(r.total!==undefined){$("nKnown").textContent=r.total.toLocaleString();$("nKnownNav").textContent=r.total.toLocaleString();}
   e.target.value="";
 };
-document.getElementById("markAll").onclick=()=>{
-  if(leads.new.length&&confirm(`Mark all ${leads.new.length} new leads as added to the queue?`))mark(leads.new.map(x=>x.key),"added");
+
+// ---- app controls
+$("updbtn").onclick=async()=>{
+  if(data.running){alert("Wait until the search is done (or press Stop) before updating.");return;}
+  await fetch("/update",{method:"POST"});
+  $("update").innerHTML="<b>Updating... the page will reload by itself.</b>";
+  const wait=async()=>{try{await fetch("/status");location.reload();}catch(e){setTimeout(wait,1500);}};
+  setTimeout(wait,3000);
 };
-document.getElementById("rows").onclick=e=>{
-  const b=e.target.closest("button[data-key]");if(b)mark([b.dataset.key],b.dataset.to);
+$("quit").onclick=async()=>{
+  if(!confirm("Turn the app off?"))return;
+  await fetch("/quit",{method:"POST"});
+  document.body.innerHTML='<div class="wrap"><h1>The app is off.</h1><p>You can close this tab. Double-click the Walmart Seller Finder icon to start it again.</p></div>';
 };
-function action(x){
-  if(tab==="Leads")return `<button class="dl" data-key="${esc(x.key)}" data-to="added" style="white-space:nowrap">Added to queue ✓</button><br><span class="hint">Found ${esc(x.found_on)}</span>`;
-  if(tab==="Added")return `<span class="hint">Added ${esc(x.added_on)}</span><br><button class="dl" data-key="${esc(x.key)}" data-to="new">Undo</button>`;
-  return `<span class="${x.status==="Rejected"?"bad":""}">${esc(x.reason)}</span>`;
-}
-function draw(){
-  const s=data.sellers;
-  for(const [k,id] of [["Good","nGood"],["Rejected","nRejected"],["Checking...","nChecking"]])
-    document.getElementById(id).textContent=s.filter(x=>x.status===k).length;
-  document.getElementById("nLeads").textContent=leads.new.length;
-  document.getElementById("nAdded").textContent=leads.added.length;
-  const inbox=tab==="Leads"||tab==="Added";
-  document.getElementById("markAll").style.display=tab==="Leads"?"":"none";
-  document.getElementById("dlLeads").style.display=tab==="Leads"?"":"none";
-  document.getElementById("dlGood").style.display=inbox?"none":"";
-  document.getElementById("dlAll").style.display=inbox?"none":"";
-  document.getElementById("lastCol").textContent=tab==="Leads"?"":tab==="Added"?"Added":"Why rejected";
-  document.getElementById("tabHint").textContent=tab==="Leads"?"Good sellers from every search wait here until you mark them as added to a sales rep's queue."
-    :tab==="Added"?"Leads you've already added to a queue. Click Undo to move one back to New leads.":"Results from the latest search only.";
-  const list=tab==="Leads"?leads.new:tab==="Added"?leads.added:s.filter(x=>x.status===tab);
-  document.getElementById("rows").innerHTML=list.length?list.map(x=>`<tr>
-    <td><b>${esc(x.seller_name)}</b>${x.business_name&&x.business_name!==x.seller_name?`<br><span class="hint">${esc(x.business_name)}</span>`:""}${x.store_mix?`<br><span class="hint">Sells: ${esc(x.store_mix)}</span>`:""}${x.found_from?`<br><span class="hint">Found from: <a href="${esc(x.found_from_url)}" target="_blank">${esc(x.found_from)}</a></span>`:""}</td>
-    <td>${esc(x.phone)}</td><td>${esc(x.email)}</td><td>${esc(x.address)}</td>
-    <td>${x.rating?esc((+x.rating).toFixed?.(1)??x.rating):""}${x.review_count?` <span class="hint">(${esc(x.review_count)})</span>`:""}</td>
-    <td>${x.seller_url?`<a href="${esc(x.seller_url)}" target="_blank">Open</a>`:""}</td>
-    <td>${action(x)}</td></tr>`).join("")
-    :`<tr><td colspan="7" class="empty">Nothing here yet.</td></tr>`;
-}
-let history=[], wasRunning=false;
-async function loadHistory(){
-  history=await (await fetch("/history")).json();
-  document.getElementById("history").innerHTML=history.length?history.map(h=>`<tr>
-    <td><b>${esc(h.keyword)}</b></td><td style="white-space:nowrap">${esc(h.last_run)}</td><td>${h.runs}</td>
-    <td>${h.sellers}${h.already_have?` <span class="hint">(${h.already_have} already had)</span>`:""}</td>
-    <td>${h.new_leads}</td><td>${h.total_new_leads}</td>
-    <td style="white-space:nowrap">${h.due?`<span class="good">Due now</span>`:esc(h.check_again)}</td>
-    <td><button class="dl" data-kw="${esc(h.keyword)}" style="white-space:nowrap">Search again</button></td></tr>`).join("")
-    :`<tr><td colspan="8" class="empty">No searches yet.</td></tr>`;
-}
-document.getElementById("history").onclick=e=>{
-  const b=e.target.closest("button[data-kw]");if(!b)return;
-  const box=document.getElementById("kw"),words=box.value.split("\n").map(s=>s.trim()).filter(Boolean);
-  if(!words.map(w=>w.toLowerCase()).includes(b.dataset.kw))words.push(b.dataset.kw);
-  box.value=words.join("\n");box.scrollIntoView({behavior:"smooth",block:"center"});
-};
-loadHistory();
+
+// ---- live status
 async function poll(){
   data=await (await fetch("/status")).json();
-  document.getElementById("start").disabled=data.running;
-  document.getElementById("stop").disabled=!data.running;
-  document.getElementById("status").textContent=data.running?"Running... (Chrome works minimized in the Dock and only pops up if Walmart needs you to press & hold)":(data.saved_file?"Last results saved to "+data.saved_file:"");
-  const log=document.getElementById("log"),atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-5;
+  $("start").disabled=data.running;$("start").textContent=data.running?"Search running...":"Start search";
+  $("running").style.display=data.running?"flex":"none";
+  if(data.running){
+    const s=data.sellers,left=s.filter(x=>x.status==="Checking...").length,done=s.length-left,last=data.log[data.log.length-1]||"";
+    const checking=/Checking seller/.test(last)||done>0;
+    $("runTitle").textContent=checking?`Checking sellers: ${done} of ${s.length} done`:`Searching Walmart... ${s.length} sellers found so far`;
+    $("runDetail").textContent=last.replace(/^\d\d:\d\d:\d\d /,"");
+    $("runBar").style.width=(checking&&s.length?Math.round(100*done/s.length):5)+"%";
+  }
+  const log=$("log"),atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-5;
   log.textContent=data.log.join("\n");if(atBottom)log.scrollTop=log.scrollHeight;
   if(wasRunning&&!data.running)loadHistory();
   wasRunning=data.running;
   if(data.leads_new!==leads.new.length||data.leads_added!==leads.added.length)loadLeads();
-  document.getElementById("nKnown").textContent=(data.known_count||0).toLocaleString();
-  document.getElementById("update").style.display=data.update_available?"flex":"none";
-  draw();
+  const k=(data.known_count||0).toLocaleString();$("nKnown").textContent=k;$("nKnownNav").textContent=k;
+  $("update").style.display=data.update_available?"flex":"none";
+  drawResults();
   setTimeout(poll,data.running?2000:30000);
 }
-poll();
+loadLeads();loadHistory();poll();
 </script></body></html>"""
 
 
@@ -1209,6 +1366,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(json.dumps(status, default=str))
         elif url.path == "/lookup":
             self.send(json.dumps(lookup(parse_qs(url.query).get("q", [""])[0])))
+        elif url.path == "/brands":
+            self.send(json.dumps(BRAND_IDEAS))
         elif url.path == "/history":
             self.send(json.dumps(get_history()))
         elif url.path == "/leads":
