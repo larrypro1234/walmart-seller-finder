@@ -8,7 +8,7 @@ A small app that searches Walmart.com and finds third-party Marketplace sellers,
 - **Skip numbers we already have**: rejected if the seller's phone is in your numbers list, or another seller in the same search already has it.
 
 ## Numbers we already have
-Click **Upload numbers** in the app and pick an Excel (.xlsx), CSV or text file. Every phone number in it is saved to `numbers.db` (a small database next to `app.py`) together with the rest of its spreadsheet row, the file it came from, and the date. Good sellers the app finds are added automatically.
+Click **Upload numbers** in the app and pick an Excel (.xlsx), CSV or text file. Every phone number in it is saved to `numbers.db` (a small database next to `app.py`) together with the rest of its spreadsheet row, the file it came from, and the date. Good sellers the app finds are added automatically. So are rejected sellers (not US, or mainly selling what we don't buy), which blocks them from future searches; sellers rejected only because their page didn't load are not saved.
 
 Use **Look up a number or name** in the app to search it: any phone format, part of a number, or words like a company or setter name.
 

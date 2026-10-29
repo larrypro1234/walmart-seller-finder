@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 12
+VERSION = 13
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -256,22 +256,37 @@ RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
 
 
 
+# Rejections that say something real about the seller. Their numbers are saved and
+# blocked from future searches. Others (like a seller page that didn't load) are not.
+BLOCKING_REASONS = ("Not a US seller", "Mostly sells what we don't buy", "Clothing-only store")
+
+
+def blocking_reason(reason):
+    return any(part.strip().startswith(BLOCKING_REASONS) for part in (reason or "").split(";"))
+
+
 def recover_numbers():
     """Make sure nothing found earlier is missing from the database: numbers versions 7-8
-    kept in known_numbers.txt, and good sellers in every saved results spreadsheet."""
+    kept in known_numbers.txt, and good and rejected sellers in every saved results spreadsheet."""
     for f in sorted(HERE.glob("walmart_sellers_*.csv")):
         try:
             rows = list(csv.DictReader(io.StringIO(f.read_text(encoding="utf-8", errors="ignore"))))
         except Exception:
             continue
-        found = []
+        found, rejected = [], []
         for r in rows:
             phone = normalize_phone(r.get("phone"))
-            if r.get("status") == "Good" and phone and phone not in KNOWN:
-                details = " · ".join(x for x in (r.get("seller_name"), r.get("address"), r.get("seller_url")) if x)
+            if not phone or phone in KNOWN:
+                continue
+            details = " · ".join(x for x in (r.get("seller_name"), r.get("address"), r.get("seller_url")) if x)
+            if r.get("status") == "Good":
                 found.append((phone, details))
+            elif r.get("status") == "Rejected" and blocking_reason(r.get("reason")):
+                rejected.append((phone, f"Rejected: {r['reason']} · {details}"))
         if found:
             add_known(found, f"Found by app ({f.name})")
+        if rejected:
+            add_known(rejected, f"Rejected by app ({f.name})")
     if OLD_KNOWN_FILE.exists():
         old = [l.strip() for l in OLD_KNOWN_FILE.read_text().splitlines() if l.strip()]
         add_known([(p, "") for p in old if p not in KNOWN], "Earlier upload")
@@ -786,6 +801,9 @@ def run_scrape(keywords, pages, active_rules, delay):
                 RUN_PHONES[phone] = rec["seller_name"]
                 add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],
                           "Found by app")
+            elif phone and phone not in KNOWN and blocking_reason(rec["reason"]):
+                add_known([(phone, f"Rejected: {rec['reason']} · {rec['seller_name']} · {rec.get('address', '')} · "
+                                   f"{rec.get('seller_url', '')}")], "Rejected by app")
             publish(sellers)
 
         save_csv(sellers)
