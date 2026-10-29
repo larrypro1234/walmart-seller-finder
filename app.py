@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 11
+VERSION = 12
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -278,6 +278,78 @@ def recover_numbers():
 
 
 recover_numbers()
+
+
+# ========================================================== NEW LEADS INBOX
+# Good sellers wait here across searches and restarts until marked "added to queue".
+
+def leads_db():
+    con = db()
+    con.execute("CREATE TABLE IF NOT EXISTS leads (key TEXT PRIMARY KEY, data TEXT NOT NULL, "
+                "status TEXT NOT NULL DEFAULT 'new', found TEXT NOT NULL DEFAULT '', added TEXT NOT NULL DEFAULT '')")
+    return con
+
+
+def lead_key(r):
+    return normalize_phone(r.get("phone")) or r.get("seller_url") or (r.get("seller_name") or "").lower()
+
+
+def add_lead(r, found=None):
+    with DB_LOCK:
+        con = leads_db()
+        with con:
+            con.execute("INSERT OR IGNORE INTO leads (key, data, found) VALUES (?, ?, ?)",
+                        (lead_key(r), json.dumps(r), found or datetime.now().strftime("%Y-%m-%d %H:%M")))
+        con.close()
+
+
+def get_leads(status):
+    con = leads_db()
+    rows = con.execute("SELECT key, data, found, added FROM leads WHERE status = ? ORDER BY found DESC, key",
+                       (status,)).fetchall()
+    con.close()
+    out = []
+    for key, data, found, added in rows:
+        r = json.loads(data)
+        r.update(key=key, found_on=found, added_on=added)
+        out.append(r)
+    return out
+
+
+def mark_leads(keys, status):
+    when = datetime.now().strftime("%Y-%m-%d %H:%M") if status == "added" else ""
+    with DB_LOCK:
+        con = leads_db()
+        with con:
+            con.executemany("UPDATE leads SET status = ?, added = ? WHERE key = ?", [(status, when, k) for k in keys])
+        con.close()
+
+
+def lead_counts():
+    con = leads_db()
+    counts = dict(con.execute("SELECT status, COUNT(*) FROM leads GROUP BY status").fetchall())
+    con.close()
+    return counts
+
+
+def seed_leads():
+    """First time the inbox exists: fill it with the good sellers from the latest search."""
+    con = db()
+    exists = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'leads'").fetchone()
+    con.close()
+    if exists:
+        return
+    leads_db().close()
+    files = sorted(HERE.glob("walmart_sellers_*.csv"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        return
+    found = datetime.fromtimestamp(files[-1].stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    for r in csv.DictReader(io.StringIO(files[-1].read_text(encoding="utf-8", errors="ignore"))):
+        if r.get("status") == "Good":
+            add_lead(r, found)
+
+
+seed_leads()
 
 
 def lookup(q, limit=50):
@@ -707,6 +779,8 @@ def run_scrape(keywords, pages, active_rules, delay):
             reasons = [r for r in reasons if r]
             rec["status"] = "Rejected" if reasons else "Good"
             rec["reason"] = "; ".join(reasons)
+            if rec["status"] == "Good":
+                add_lead(row(rec))
             phone = normalize_phone(rec.get("phone"))
             if rec["status"] == "Good" and phone:
                 RUN_PHONES[phone] = rec["seller_name"]
@@ -747,7 +821,7 @@ def publish(sellers):
 
 def to_csv(rows):
     buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=COLUMNS)
+    w = csv.DictWriter(buf, fieldnames=COLUMNS, extrasaction="ignore")
     w.writeheader()
     w.writerows(rows)
     return buf.getvalue()
@@ -840,19 +914,35 @@ a{color:var(--blue)}
 <div class="card"><label class="h">What it's doing</label><div id="log"></div></div>
 <div class="card">
   <div class="tabs">
-    <button class="tab on" data-t="Good">Good sellers (<span id="nGood">0</span>)</button>
+    <button class="tab on" data-t="Leads">New leads (<span id="nLeads">0</span>)</button>
+    <button class="tab" data-t="Added">Added to queue (<span id="nAdded">0</span>)</button>
+    <span class="hint" style="margin:0 4px 0 12px">This search:</span>
+    <button class="tab" data-t="Good">Good (<span id="nGood">0</span>)</button>
     <button class="tab" data-t="Rejected">Rejected (<span id="nRejected">0</span>)</button>
     <button class="tab" data-t="Checking...">Still checking (<span id="nChecking">0</span>)</button>
-    <span style="flex:1"></span>
-    <button class="dl" onclick="location='/download?which=good'">Download good sellers</button>
-    <button class="dl" onclick="location='/download?which=all'">Download all</button>
+  </div>
+  <div class="tabs" id="actions">
+    <span class="hint" id="tabHint" style="flex:1;margin:0"></span>
+    <button class="dl" id="markAll" style="display:none">Mark all as added</button>
+    <button class="dl" id="dlLeads" onclick="location='/download?which=leads'">Download new leads</button>
+    <button class="dl" id="dlGood" onclick="location='/download?which=good'" style="display:none">Download good sellers</button>
+    <button class="dl" id="dlAll" onclick="location='/download?which=all'" style="display:none">Download all</button>
   </div>
   <div class="tablewrap"><table><thead><tr>
-    <th>Seller</th><th>Phone</th><th>Email</th><th>Address</th><th>Rating</th><th>Store</th><th>Why rejected</th>
+    <th>Seller</th><th>Phone</th><th>Email</th><th>Address</th><th>Rating</th><th>Store</th><th id="lastCol"></th>
   </tr></thead><tbody id="rows"></tbody></table></div>
 </div></div>
 <script>
-let tab="Good", data={sellers:[]};
+let tab="Leads", data={sellers:[]}, leads={new:[],added:[]};
+async function loadLeads(){
+  const [n,a]=await Promise.all(["new","added"].map(st=>fetch("/leads?status="+st).then(r=>r.json())));
+  leads={new:n,added:a};draw();
+}
+async function mark(keys,status){
+  await fetch("/leads/mark",{method:"POST",body:JSON.stringify({keys,status})});
+  await loadLeads();
+}
+loadLeads();
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 fetch("/rules").then(r=>r.json()).then(rules=>{
   document.getElementById("rules").innerHTML=rules.map(r=>
@@ -902,17 +992,38 @@ document.getElementById("knownFile").onchange=async e=>{
   if(r.total!==undefined)document.getElementById("nKnown").textContent=r.total.toLocaleString();
   e.target.value="";
 };
+document.getElementById("markAll").onclick=()=>{
+  if(leads.new.length&&confirm(`Mark all ${leads.new.length} new leads as added to the queue?`))mark(leads.new.map(x=>x.key),"added");
+};
+document.getElementById("rows").onclick=e=>{
+  const b=e.target.closest("button[data-key]");if(b)mark([b.dataset.key],b.dataset.to);
+};
+function action(x){
+  if(tab==="Leads")return `<button class="dl" data-key="${esc(x.key)}" data-to="added" style="white-space:nowrap">Added to queue ✓</button><br><span class="hint">Found ${esc(x.found_on)}</span>`;
+  if(tab==="Added")return `<span class="hint">Added ${esc(x.added_on)}</span><br><button class="dl" data-key="${esc(x.key)}" data-to="new">Undo</button>`;
+  return `<span class="${x.status==="Rejected"?"bad":""}">${esc(x.reason)}</span>`;
+}
 function draw(){
   const s=data.sellers;
   for(const [k,id] of [["Good","nGood"],["Rejected","nRejected"],["Checking...","nChecking"]])
     document.getElementById(id).textContent=s.filter(x=>x.status===k).length;
-  const list=s.filter(x=>x.status===tab);
+  document.getElementById("nLeads").textContent=leads.new.length;
+  document.getElementById("nAdded").textContent=leads.added.length;
+  const inbox=tab==="Leads"||tab==="Added";
+  document.getElementById("markAll").style.display=tab==="Leads"?"":"none";
+  document.getElementById("dlLeads").style.display=tab==="Leads"?"":"none";
+  document.getElementById("dlGood").style.display=inbox?"none":"";
+  document.getElementById("dlAll").style.display=inbox?"none":"";
+  document.getElementById("lastCol").textContent=tab==="Leads"?"":tab==="Added"?"Added":"Why rejected";
+  document.getElementById("tabHint").textContent=tab==="Leads"?"Good sellers from every search wait here until you mark them as added to a sales rep's queue."
+    :tab==="Added"?"Leads you've already added to a queue. Click Undo to move one back to New leads.":"Results from the latest search only.";
+  const list=tab==="Leads"?leads.new:tab==="Added"?leads.added:s.filter(x=>x.status===tab);
   document.getElementById("rows").innerHTML=list.length?list.map(x=>`<tr>
     <td><b>${esc(x.seller_name)}</b>${x.business_name&&x.business_name!==x.seller_name?`<br><span class="hint">${esc(x.business_name)}</span>`:""}${x.store_mix?`<br><span class="hint">Sells: ${esc(x.store_mix)}</span>`:""}${x.found_from?`<br><span class="hint">Found from: <a href="${esc(x.found_from_url)}" target="_blank">${esc(x.found_from)}</a></span>`:""}</td>
     <td>${esc(x.phone)}</td><td>${esc(x.email)}</td><td>${esc(x.address)}</td>
     <td>${x.rating?esc((+x.rating).toFixed?.(1)??x.rating):""}${x.review_count?` <span class="hint">(${esc(x.review_count)})</span>`:""}</td>
     <td>${x.seller_url?`<a href="${esc(x.seller_url)}" target="_blank">Open</a>`:""}</td>
-    <td class="${x.status==="Rejected"?"bad":""}">${esc(x.reason)}</td></tr>`).join("")
+    <td>${action(x)}</td></tr>`).join("")
     :`<tr><td colspan="7" class="empty">Nothing here yet.</td></tr>`;
 }
 async function poll(){
@@ -922,6 +1033,7 @@ async function poll(){
   document.getElementById("status").textContent=data.running?"Running... (Chrome works minimized in the Dock and only pops up if Walmart needs you to press & hold)":(data.saved_file?"Last results saved to "+data.saved_file:"");
   const log=document.getElementById("log"),atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-5;
   log.textContent=data.log.join("\n");if(atBottom)log.scrollTop=log.scrollHeight;
+  if(data.leads_new!==leads.new.length||data.leads_added!==leads.added.length)loadLeads();
   document.getElementById("nKnown").textContent=(data.known_count||0).toLocaleString();
   document.getElementById("update").style.display=data.update_available?"flex":"none";
   draw();
@@ -955,13 +1067,20 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available")}
                 status["known_count"] = len(KNOWN)
+                counts = lead_counts()
+                status["leads_new"], status["leads_added"] = counts.get("new", 0), counts.get("added", 0)
                 self.send(json.dumps(status, default=str))
         elif url.path == "/lookup":
             self.send(json.dumps(lookup(parse_qs(url.query).get("q", [""])[0])))
+        elif url.path == "/leads":
+            self.send(json.dumps(get_leads(parse_qs(url.query).get("status", ["new"])[0]), default=str))
         elif url.path == "/download":
             which = parse_qs(url.query).get("which", ["good"])[0]
-            with LOCK:
-                rows = [s for s in STATE["sellers"] if which == "all" or s["status"] == "Good"]
+            if which == "leads":
+                rows = get_leads("new")
+            else:
+                with LOCK:
+                    rows = [s for s in STATE["sellers"] if which == "all" or s["status"] == "Good"]
             name = f"walmart_sellers_{which}_{datetime.now():%Y-%m-%d}.csv"
             self.send(to_csv(rows), "text/csv; charset=utf-8",
                       {"Content-Disposition": f'attachment; filename="{name}"'})
@@ -993,6 +1112,9 @@ class Handler(BaseHTTPRequestHandler):
             pages = max(1, min(25, int(body.get("pages") or 3)))
             threading.Thread(target=run_scrape, daemon=True,
                              args=(body["keywords"], pages, set(body.get("rules", [])), 2.0)).start()
+            self.send('{"ok":true}')
+        elif self.path == "/leads/mark":
+            mark_leads(body.get("keys", []), "added" if body.get("status") == "added" else "new")
             self.send('{"ok":true}')
         elif self.path == "/stop":
             STATE["stop"] = True

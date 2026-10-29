@@ -14,6 +14,9 @@ Use **Look up a number or name** in the app to search it: any phone format, part
 
 This database stays on your computer and is never uploaded to GitHub.
 
+## New leads inbox
+Every good seller from every search goes into **New leads** and stays there (across searches and restarts) until you click **Added to queue ✓**. Added leads move to the **Added to queue** tab, where **Undo** moves them back. **Download new leads** gives a spreadsheet of the inbox. Stored in `numbers.db` on your computer only.
+
 ## Running it (Mac)
 Double-click the **Walmart Seller Finder** icon on the Desktop. The app opens in your browser.
 Click **Quit app** in the top right to turn it off.
