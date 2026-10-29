@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 19
+VERSION = 20
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -826,12 +826,30 @@ def install_and_restart(text, open_browser=True):
     os.execv(sys.executable, [sys.executable, str(me)] + ([] if open_browser else ["--no-open"]))
 
 
-def watch_for_updates():
-    while True:
-        time.sleep(30 * 60)
+UPDATE_CHECK = {"last": time.time(), "busy": False}
+
+
+def check_for_update():
+    UPDATE_CHECK.update(last=time.time(), busy=True)
+    try:
         text = fetch_latest()
         if text:
             STATE["update_available"] = re.search(r"^VERSION = (\d+)", text, re.M).group(1)
+    finally:
+        UPDATE_CHECK["busy"] = False
+
+
+def maybe_check_for_update():
+    """Called whenever the app page asks for its status: look for a new version at most every 5 minutes,
+    so the Update now bar shows up soon after opening the app instead of up to 30 minutes later."""
+    if not UPDATE_CHECK["busy"] and not STATE["update_available"] and time.time() - UPDATE_CHECK["last"] > 5 * 60:
+        threading.Thread(target=check_for_update, daemon=True).start()
+
+
+def watch_for_updates():
+    while True:
+        time.sleep(30 * 60)
+        check_for_update()
 
 
 # ============================================================== SCRAPER
@@ -1562,6 +1580,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/rules":
             self.send(json.dumps([{"id": r["id"], "label": r["label"]} for r in RULES]))
         elif url.path == "/status":
+            maybe_check_for_update()
             with LOCK:
                 status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available", "summary")}
                 status["known_count"] = len(KNOWN)
