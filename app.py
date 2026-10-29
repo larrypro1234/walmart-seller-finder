@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 16
+VERSION = 17
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -570,6 +570,42 @@ BRAND_IDEAS = {
 }
 
 
+# "Search every corner": Walmart shows at most MAX_PAGES pages per search, so a big
+# search is split into price ranges (each gets its own pages) plus related terms.
+PRICE_BANDS = [(0, 10), (10, 20), (20, 35), (35, 60), (60, 100), (100, 200), (200, 100000)]
+RELATED_TERMS = {
+    "lego": ["lego star wars", "lego technic", "lego city", "lego friends", "lego duplo", "lego harry potter",
+             "lego minecraft", "lego creator", "lego marvel", "lego ninjago", "lego disney", "lego icons",
+             "lego classic", "lego speed champions", "lego architecture", "lego botanical"],
+    "barbie": ["barbie dolls", "barbie dreamhouse", "barbie accessories", "barbie playset", "barbie car", "barbie clothes"],
+    "hot wheels": ["hot wheels cars", "hot wheels track", "hot wheels monster trucks", "hot wheels 20 pack", "hot wheels premium"],
+    "nerf": ["nerf blaster", "nerf darts", "nerf elite", "nerf fortnite", "nerf rival"],
+    "funko": ["funko pop", "funko pop marvel", "funko pop disney", "funko pop anime", "funko soda"],
+    "pokemon": ["pokemon cards", "pokemon booster box", "pokemon elite trainer box", "pokemon plush", "pokemon figures"],
+    "hasbro": ["hasbro games", "monopoly", "play-doh", "transformers", "my little pony", "marvel legends", "peppa pig toys"],
+    "mattel": ["mattel games", "uno", "polly pocket", "matchbox", "mega bloks", "jurassic world toys", "masters of the universe"],
+    "fisher-price": ["fisher-price baby toys", "fisher-price little people", "fisher-price laugh and learn", "fisher-price imaginext"],
+    "melissa & doug": ["melissa and doug puzzles", "melissa and doug wooden toys", "melissa and doug pretend play"],
+    "squishmallows": ["squishmallows 8 inch", "squishmallows 12 inch", "squishmallows 16 inch", "squishmallows 24 inch"],
+    "board games": ["family board games", "strategy board games", "kids board games", "card games", "party games"],
+    "puzzles": ["1000 piece puzzle", "500 piece puzzle", "kids puzzles", "jigsaw puzzles"],
+}
+
+
+def search_url(term):
+    return f"{BASE}/search?q={quote_plus(term)}"
+
+
+def search_plan(kw, every_corner):
+    """(label, url, is_price_band) for each search to run for one search word."""
+    if not every_corner:
+        return [(kw, search_url(kw), False)]
+    plan = [(f"{kw} (${lo}-${hi})" if hi < 100000 else f"{kw} (${lo}+)",
+             f"{search_url(kw)}&min_price={lo}&max_price={hi}", True) for lo, hi in PRICE_BANDS]
+    plan += [(t, search_url(t), False) for t in RELATED_TERMS.get(kw.strip().lower(), [])]
+    return plan
+
+
 # ========================================================= PAGE PARSING
 
 def next_data(html):
@@ -841,7 +877,7 @@ class Browser:
             pass
 
 
-def run_scrape(keywords, pages, active_rules, delay):
+def run_scrape(keywords, pages, active_rules, delay, every_corner=False):
     sellers = {}
     RUN_PHONES.clear()
     searched = []  # search words that actually ran, for the search history
@@ -851,43 +887,59 @@ def run_scrape(keywords, pages, active_rules, delay):
         br = Browser(delay)
         # Step 1: find sellers in search results.
         for kw in keywords:
-            if not STATE["stop"]:
-                searched.append(kw)
-            for page in range(1, pages + 1):
+            if STATE["stop"]:
+                break
+            searched.append(kw)
+            plan = search_plan(kw, every_corner)
+            if every_corner:
+                log(f'Searching every corner of "{kw}": {len(plan)} searches')
+            first_ids = None  # first-page products of the first price band, to spot ignored price filters
+            skip_bands = False
+            for label, url, is_price_band in plan:
                 if STATE["stop"]:
                     break
-                log(f'Searching "{kw}" - page {page}')
-                html = br.get(f"{BASE}/search?q={quote_plus(kw)}&page={page}")
-                data = next_data(html) if html else None
-                # Stop when Walmart runs out of products (not just out of third-party sellers:
-                # a page can be all Walmart's own items and the next page still have sellers).
-                products = sum(1 for d in walk(data) if d.get("usItemId") and d.get("name")) if data else 0
-                if not products:
-                    log(f'  no more results for "{kw}"' if html else f'  couldn\'t load page {page}, moving on')
-                    break
-                last_page = first(data, "maxPage")
-                hits = parse_search(data)
-                new = 0
-                for h in hits:
-                    key = h["seller_name"].lower()
-                    if key not in sellers:
-                        new += 1
-                        sellers[key] = {
-                            "seller_name": h["seller_name"], "catalog_seller_id": "",
-                            "keywords": set(), "products": {},
-                            "sample_product_url": h["product_url"], "status": "Checking...",
-                            "found_from": f'"{kw}" search: {h["product"]}', "found_from_url": h["product_url"],
-                        }
-                    rec = sellers[key]
-                    if h["catalog_seller_id"].isdigit():
-                        rec["catalog_seller_id"] = h["catalog_seller_id"]
-                    rec["keywords"].add(kw)
-                    rec["products"][h["item_id"]] = h["item_text"]
-                log(f"  found {new} new sellers ({len(sellers)} total)")
-                publish(sellers)
-                if str(last_page).isdigit() and page >= int(last_page):
-                    log(f'  that was the last page for "{kw}"')
-                    break
+                if is_price_band and skip_bands:
+                    continue
+                for page in range(1, pages + 1):
+                    if STATE["stop"]:
+                        break
+                    log(f'Searching "{label}" - page {page}')
+                    html = br.get(f"{url}&page={page}")
+                    data = next_data(html) if html else None
+                    # Stop when Walmart runs out of products (not just out of third-party sellers:
+                    # a page can be all Walmart's own items and the next page still have sellers).
+                    ids = {str(d["usItemId"]) for d in walk(data) if d.get("usItemId") and d.get("name")} if data else set()
+                    if not ids:
+                        log(f'  no more results for "{label}"' if html else f"  couldn't load page {page}, moving on")
+                        break
+                    if is_price_band and page == 1:
+                        if first_ids is not None and ids == first_ids:
+                            log("  Walmart ignored the price filter, so skipping the other price ranges")
+                            skip_bands = True
+                            break
+                        first_ids = first_ids if first_ids is not None else ids
+                    last_page = first(data, "maxPage")
+                    new = 0
+                    for h in parse_search(data):
+                        key = h["seller_name"].lower()
+                        if key not in sellers:
+                            new += 1
+                            sellers[key] = {
+                                "seller_name": h["seller_name"], "catalog_seller_id": "",
+                                "keywords": set(), "products": {},
+                                "sample_product_url": h["product_url"], "status": "Checking...",
+                                "found_from": f'"{label}" search: {h["product"]}', "found_from_url": h["product_url"],
+                            }
+                        rec = sellers[key]
+                        if h["catalog_seller_id"].isdigit():
+                            rec["catalog_seller_id"] = h["catalog_seller_id"]
+                        rec["keywords"].add(kw)
+                        rec["products"][h["item_id"]] = h["item_text"]
+                    log(f"  found {new} new sellers ({len(sellers)} total)")
+                    publish(sellers)
+                    if str(last_page).isdigit() and page >= int(last_page):
+                        log(f'  that was the last page for "{label}"')
+                        break
 
         # Step 2: open each seller's page, get their details, apply the rules.
         for i, rec in enumerate(list(sellers.values()), 1):
@@ -1112,6 +1164,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
         <option value="10">Very deep: 10 pages per search</option>
         <option value="25">All pages: keep going until Walmart runs out (up to 25)</option>
       </select>
+      <label class="check" style="align-items:flex-start;margin-top:12px"><input type="checkbox" id="everyCorner" style="margin-top:4px">
+        <span><b>Search every corner</b><br><span class="muted">Splits each search by price and also searches related terms (like "lego star wars"), so it finds far more sellers. Takes much longer: use it with "All pages".</span></span></label>
       <h3 style="margin-top:16px">3. Rules</h3>
       <div id="rules"></div>
     </div>
@@ -1230,7 +1284,7 @@ $("start").onclick=async()=>{
   const keywords=words();
   if(!keywords.length){alert("Type at least one thing to search for, or click a brand.");return;}
   const rules=[...document.querySelectorAll("#rules input:checked")].map(i=>i.value);
-  await fetch("/start",{method:"POST",body:JSON.stringify({keywords,rules,pages:+$("pages").value})});
+  await fetch("/start",{method:"POST",body:JSON.stringify({keywords,rules,pages:+$("pages").value,every_corner:$("everyCorner").checked})});
   resView="Good";document.querySelectorAll("[data-r]").forEach(x=>x.classList.toggle("on",x.dataset.r==="Good"));
   poll();
 };
@@ -1420,7 +1474,7 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.update(running=True, stop=False, log=[], sellers=[], saved_file="")
             pages = max(1, min(MAX_PAGES, int(body.get("pages") or 3)))
             threading.Thread(target=run_scrape, daemon=True,
-                             args=(body["keywords"], pages, set(body.get("rules", [])), 2.0)).start()
+                             args=(body["keywords"], pages, set(body.get("rules", [])), 2.0, bool(body.get("every_corner")))).start()
             self.send('{"ok":true}')
         elif self.path == "/leads/mark":
             mark_leads(body.get("keys", []), "added" if body.get("status") == "added" else "new")

@@ -20,6 +20,9 @@ Every good seller from every search goes into **New leads** and stays there (acr
 ## Search history
 Every search word is logged: when it was last searched, how many times, how many sellers and new leads it found last time, and the total new leads it has ever found. **Check again** suggests when to search it again (1 week if it found 5+ new leads last time, 2 weeks if 1-4, 1 month if none) and says **Due now** once that date has passed. **Search again** adds the word to the search box.
 
+## Search every corner
+Walmart shows at most 25 result pages per search. With **Search every corner** ticked, each search word is split into price ranges (each gets its own 25 pages) and, for big brands, related terms are searched too (`RELATED_TERMS` in `app.py`, e.g. "lego star wars"). If Walmart ignores the price filter, the app notices and skips the extra price searches.
+
 ## Layout
 The app has four sections: **Leads** (the inbox), **Search** (search box, brand ideas, rules, latest results), **History** (search history and what's due), and **Numbers** (look up and upload numbers). Brand ideas live in `BRAND_IDEAS` in `app.py`.
 
