@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 21
+VERSION = 22
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -1009,17 +1009,19 @@ def find_hidden_sellers(br, products, sellers, stats):
             html = br.get(p["url"])
             data = next_data(html) if html else None
         offers = parse_offers(data, pid) if data else []
-        found_any = found_any or bool(offers)
         new = sum(add_found_seller(sellers, o["seller_name"], o["catalog_seller_id"], p["kw"],
                                    f'"{p["label"]}" more sellers on: {p["name"]}', p["url"], pid, p["name"])
                   for o in offers)
+        # Only count it as working if a page really lists more than one seller (the main seller
+        # alone is just the one search already showed).
+        found_any = found_any or len(offers) > 1 or new > 0
         stats["hidden_checked"] = n
         stats["hidden_found"] += new
         if new:
             log(f"  found {new} hidden sellers ({len(sellers)} total)")
             publish(sellers)
-        if n == 10 and not found_any:
-            log("  Couldn't find Walmart's all-sellers lists on these pages, so skipping hidden sellers")
+        if n == 25 and not found_any:
+            log("  No extra sellers on the first 25 products' seller lists, so skipping hidden sellers")
             stats["hidden_note"] = "Walmart's more-sellers lists couldn't be read, so this step was skipped"
             break
 
