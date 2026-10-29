@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 20
+VERSION = 21
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -873,6 +873,9 @@ class Browser:
     def __init__(self, delay):
         self.delay = delay
         self._pw = sync_playwright().start()
+        self._open()
+
+    def _open(self):
         self.ctx = self._pw.chromium.launch_persistent_context(
             str(HERE / "browser-profile"),
             headless=False,
@@ -908,13 +911,37 @@ class Browser:
         self._set_state("normal")
         self.page.bring_to_front()
 
+    def _closed(self):
+        try:
+            return self.page.is_closed() or not self.ctx.pages
+        except Exception:
+            return True
+
+    def reopen(self):
+        log("Chrome was closed, so opening it again")
+        try:
+            self.ctx.close()
+        except Exception:
+            pass
+        self._open()
+
     def get(self, url):
         time.sleep(self.delay + random.uniform(0, self.delay))
-        try:
-            self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        except Exception as e:
-            log(f"Could not load page: {e}")
-            return None
+        for attempt in (1, 2):
+            if self._closed():
+                try:
+                    self.reopen()
+                except Exception as e:
+                    log(f"Couldn't open Chrome again: {e}")
+                    return None
+            try:
+                self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                break
+            except Exception as e:
+                if attempt == 1 and ("closed" in str(e).lower() or self._closed()):
+                    continue  # Chrome went away mid-load: reopen and try once more
+                log(f"Could not load page: {e}")
+                return None
         warned = False
         for _ in range(120):
             if STATE["stop"]:
@@ -995,6 +1022,98 @@ def find_hidden_sellers(br, products, sellers, stats):
             log("  Couldn't find Walmart's all-sellers lists on these pages, so skipping hidden sellers")
             stats["hidden_note"] = "Walmart's more-sellers lists couldn't be read, so this step was skipped"
             break
+
+
+NOT_LOADED = "Walmart page didn't load. Press Finish checking to try again."
+
+
+def check_seller(br, rec, active_rules):
+    """Open one seller's page, fill in their details and apply the rules.
+    Returns False if Walmart's page didn't load (the seller stays unchecked)."""
+    cid = rec["catalog_seller_id"]
+    if not cid.isdigit():
+        html = br.get(rec["sample_product_url"])
+        if not html:
+            return False
+        cid = str(first(next_data(html), "catalogSellerId") or "") if next_data(html) else ""
+        rec["catalog_seller_id"] = cid
+    if cid.isdigit():
+        rec["seller_url"] = f"{BASE}/seller/{cid}"
+        html = br.get(rec["seller_url"])
+        data = next_data(html) if html else None
+        if not data:
+            return False
+        info = parse_seller_page(data, html)
+        rec["products"].update(info.pop("store_products"))
+        rec.update(info)
+    rec["store_mix"] = describe_mix(store_mix(rec))
+    reasons = [r["check"](rec) for r in RULES if r["id"] in active_rules]
+    reasons = [r for r in reasons if r]
+    rec["status"] = "Rejected" if reasons else "Good"
+    rec["reason"] = "; ".join(reasons)
+    if rec["status"] == "Good":
+        add_lead(row(rec))
+    phone = normalize_phone(rec.get("phone"))
+    if rec["status"] == "Good" and phone:
+        RUN_PHONES[phone] = rec["seller_name"]
+        add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],
+                  "Found by app")
+    elif phone and phone not in KNOWN and blocking_reason(rec["reason"]):
+        add_known([(phone, f"Rejected: {rec['reason']} · {rec['seller_name']} · {rec.get('address', '')} · "
+                           f"{rec.get('seller_url', '')}")], "Rejected by app")
+    return True
+
+
+def check_sellers(br, sellers, active_rules):
+    todo = [r for r in sellers.values() if r["status"] == "Checking..."]
+    for i, rec in enumerate(todo, 1):
+        if STATE["stop"]:
+            break
+        log(f"Checking seller {i}/{len(todo)}: {rec['seller_name']}")
+        if not check_seller(br, rec, active_rules):
+            rec["reason"] = NOT_LOADED
+            log("  couldn't load this seller's page, leaving it for Finish checking")
+        publish(sellers)
+
+
+def run_finish(active_rules, delay):
+    """Finish checking the last search's sellers that weren't checked (stopped early, or pages didn't load)."""
+    with LOCK:
+        rows = [dict(r) for r in STATE["sellers"]]
+    sellers = {}
+    for r in rows:
+        rec = dict(r)
+        rec["keywords"] = {k.strip() for k in str(r.get("keywords") or "").split(";") if k.strip()}
+        rec["products"] = {}
+        rec["sample_product_url"] = r.get("found_from_url") or r.get("seller_url") or ""
+        rec["catalog_seller_id"] = str(r.get("catalog_seller_id") or "")
+        if r.get("status") == "Rejected" and r.get("reason") == "Country not shown on seller page":
+            rec["status"] = "Checking..."  # older versions marked pages that didn't load this way
+        sellers[rec["seller_name"].lower()] = rec
+    RUN_PHONES.clear()
+    RUN_PHONES.update({normalize_phone(r.get("phone")): r["seller_name"] for r in rows
+                       if r.get("status") == "Good" and normalize_phone(r.get("phone"))})
+    todo = sum(1 for r in sellers.values() if r["status"] == "Checking...")
+    log(f"Finishing the last search: {todo} sellers still to check")
+    br = None
+    try:
+        br = Browser(delay)
+        publish(sellers)
+        check_sellers(br, sellers, active_rules)
+        save_csv(sellers)
+        good = sum(1 for s in sellers.values() if s["status"] == "Good")
+        left = sum(1 for s in sellers.values() if s["status"] == "Checking...")
+        log(f"Done! {good} good sellers in this search" + (f", {left} still not checked" if left else "") +
+            f". Saved to {STATE['saved_file']}")
+    except Exception as e:
+        log(f"Something went wrong: {e}")
+        save_csv(sellers)
+    finally:
+        if br:
+            br.close()
+        with LOCK:
+            STATE["running"] = False
+            STATE["stop"] = False
 
 
 def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_sellers=False):
@@ -1095,39 +1214,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
         log("Summary: " + STATE["summary"])
 
         # Step 2: open each seller's page, get their details, apply the rules.
-        for i, rec in enumerate(list(sellers.values()), 1):
-            if STATE["stop"]:
-                break
-            log(f"Checking seller {i}/{len(sellers)}: {rec['seller_name']}")
-            cid = rec["catalog_seller_id"]
-            if not cid.isdigit():
-                html = br.get(rec["sample_product_url"])
-                cid = str(first(next_data(html), "catalogSellerId") or "") if html and next_data(html) else ""
-                rec["catalog_seller_id"] = cid
-            if cid.isdigit():
-                rec["seller_url"] = f"{BASE}/seller/{cid}"
-                html = br.get(rec["seller_url"])
-                data = next_data(html) if html else None
-                if data:
-                    info = parse_seller_page(data, html)
-                    rec["products"].update(info.pop("store_products"))
-                    rec.update(info)
-            rec["store_mix"] = describe_mix(store_mix(rec))
-            reasons = [r["check"](rec) for r in RULES if r["id"] in active_rules]
-            reasons = [r for r in reasons if r]
-            rec["status"] = "Rejected" if reasons else "Good"
-            rec["reason"] = "; ".join(reasons)
-            if rec["status"] == "Good":
-                add_lead(row(rec))
-            phone = normalize_phone(rec.get("phone"))
-            if rec["status"] == "Good" and phone:
-                RUN_PHONES[phone] = rec["seller_name"]
-                add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],
-                          "Found by app")
-            elif phone and phone not in KNOWN and blocking_reason(rec["reason"]):
-                add_known([(phone, f"Rejected: {rec['reason']} · {rec['seller_name']} · {rec.get('address', '')} · "
-                                   f"{rec.get('seller_url', '')}")], "Rejected by app")
-            publish(sellers)
+        check_sellers(br, sellers, active_rules)
 
         save_csv(sellers)
         good = sum(1 for s in sellers.values() if s["status"] == "Good")
@@ -1339,8 +1426,9 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
   <div class="pills">
     <button class="pill on" data-r="Good">Good <span id="nGood">0</span></button>
     <button class="pill" data-r="Rejected">Rejected <span id="nRejected">0</span></button>
-    <button class="pill" data-r="Checking...">Still checking <span id="nChecking">0</span></button>
+    <button class="pill" data-r="Checking..."><span id="checkLabel">Still checking</span> <span id="nChecking">0</span></button>
     <span style="flex:1"></span>
+    <button class="primary small" id="finish" style="display:none">Finish checking</button>
     <button class="small" onclick="location='/download?which=all'">Download results</button>
   </div>
   <div class="tablewrap"><table><thead><tr><th>Seller</th><th>Contact</th><th>Location</th><th>Rating</th><th id="resLast"></th></tr></thead>
@@ -1445,14 +1533,22 @@ $("start").onclick=async()=>{
   poll();
 };
 $("stop").onclick=()=>fetch("/stop",{method:"POST"});
+$("finish").onclick=async()=>{
+  const rules=[...document.querySelectorAll("#rules input:checked")].map(i=>i.value);
+  await fetch("/finish",{method:"POST",body:JSON.stringify({rules})});poll();
+};
 function drawResults(){
   const s=data.sellers;
   for(const [k,id] of [["Good","nGood"],["Rejected","nRejected"],["Checking...","nChecking"]])$(id).textContent=s.filter(x=>x.status===k).length;
-  $("resLast").textContent=resView==="Rejected"?"Why rejected":"";
+  const unchecked=s.filter(x=>x.status==="Checking...").length+s.filter(x=>x.status==="Rejected"&&x.reason==="Country not shown on seller page").length;
+  $("checkLabel").textContent=data.running?"Still checking":"Not checked";
+  $("finish").style.display=!data.running&&unchecked?"":"none";
+  $("finish").textContent=`Finish checking ${unchecked} sellers`;
+  $("resLast").textContent=resView==="Rejected"?"Why rejected":resView==="Checking..."?"Why not checked":"";
   const list=s.filter(x=>x.status===resView);
   $("resRows").innerHTML=list.length?list.map(x=>`<tr>
     <td>${sellerCell(x)}</td><td>${contactCell(x)}</td><td>${placeCell(x)}</td><td>${ratingCell(x)}</td>
-    <td style="text-align:right">${resView==="Rejected"?`<div class="why" style="text-align:left;max-width:240px">${esc(x.reason)}</div>`:storeBtn(x)}</td></tr>`).join("")
+    <td style="text-align:right">${resView!=="Good"&&x.reason?`<div class="why" style="text-align:left;max-width:240px">${esc(x.reason)}</div>`:storeBtn(x)}</td></tr>`).join("")
     :`<tr><td colspan="5" class="empty">Nothing here.</td></tr>`;
   $("summary").style.display=data.summary?"":"none";$("summary").textContent=data.summary?"Last search: "+data.summary:"";
   $("lastInfo").textContent=data.saved_file?`Saved to ${data.saved_file} in your walmart folder. Good sellers are also added to Leads.`:"Good sellers from here are also added to Leads automatically.";
@@ -1637,6 +1733,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send('{"ok":true}')
         elif self.path == "/leads/mark":
             mark_leads(body.get("keys", []), "added" if body.get("status") == "added" else "new")
+            self.send('{"ok":true}')
+        elif self.path == "/finish":
+            with LOCK:
+                if STATE["running"]:
+                    return self.send('{"ok":false}')
+                STATE.update(running=True, stop=False, log=[], summary="")
+            threading.Thread(target=run_finish, daemon=True, args=(set(body.get("rules", [])), 2.0)).start()
             self.send('{"ok":true}')
         elif self.path == "/stop":
             STATE["stop"] = True
