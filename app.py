@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 10
+VERSION = 11
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -254,8 +254,30 @@ def load_known():
 KNOWN = load_known()
 RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
 
-if not KNOWN and OLD_KNOWN_FILE.exists():  # move numbers over from versions 7-8
-    add_known([(l.strip(), "") for l in OLD_KNOWN_FILE.read_text().splitlines() if l.strip()], "Earlier upload")
+
+
+def recover_numbers():
+    """Make sure nothing found earlier is missing from the database: numbers versions 7-8
+    kept in known_numbers.txt, and good sellers in every saved results spreadsheet."""
+    for f in sorted(HERE.glob("walmart_sellers_*.csv")):
+        try:
+            rows = list(csv.DictReader(io.StringIO(f.read_text(encoding="utf-8", errors="ignore"))))
+        except Exception:
+            continue
+        found = []
+        for r in rows:
+            phone = normalize_phone(r.get("phone"))
+            if r.get("status") == "Good" and phone and phone not in KNOWN:
+                details = " · ".join(x for x in (r.get("seller_name"), r.get("address"), r.get("seller_url")) if x)
+                found.append((phone, details))
+        if found:
+            add_known(found, f"Found by app ({f.name})")
+    if OLD_KNOWN_FILE.exists():
+        old = [l.strip() for l in OLD_KNOWN_FILE.read_text().splitlines() if l.strip()]
+        add_known([(p, "") for p in old if p not in KNOWN], "Earlier upload")
+
+
+recover_numbers()
 
 
 def lookup(q, limit=50):
@@ -731,6 +753,20 @@ def to_csv(rows):
     return buf.getvalue()
 
 
+def load_last_results():
+    """Show the most recent search's results again after the app restarts."""
+    files = sorted(HERE.glob("walmart_sellers_*.csv"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        return
+    try:
+        rows = list(csv.DictReader(io.StringIO(files[-1].read_text(encoding="utf-8", errors="ignore"))))
+    except Exception:
+        return
+    if rows and "status" in rows[0]:
+        STATE["sellers"] = rows
+        STATE["saved_file"] = files[-1].name
+
+
 def save_csv(sellers):
     if not sellers:
         return
@@ -994,6 +1030,7 @@ def main():
         print("Installing a newer version of the app...")
         install_and_restart(text, open_browser="--no-open" not in sys.argv)
     threading.Thread(target=watch_for_updates, daemon=True).start()
+    load_last_results()
     for port in range(8765, 8785):
         try:
             server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
