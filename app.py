@@ -34,9 +34,10 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 15
+VERSION = 16
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
+MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
 WALMART_FIRST_PARTY_IDS = {"F55CDC31AB754BB68FE0B39041159D63", "0"}
 
@@ -857,9 +858,15 @@ def run_scrape(keywords, pages, active_rules, delay):
                     break
                 log(f'Searching "{kw}" - page {page}')
                 html = br.get(f"{BASE}/search?q={quote_plus(kw)}&page={page}")
-                hits = parse_search(next_data(html)) if html else []
-                if not hits:
+                data = next_data(html) if html else None
+                # Stop when Walmart runs out of products (not just out of third-party sellers:
+                # a page can be all Walmart's own items and the next page still have sellers).
+                products = sum(1 for d in walk(data) if d.get("usItemId") and d.get("name")) if data else 0
+                if not products:
+                    log(f'  no more results for "{kw}"' if html else f'  couldn\'t load page {page}, moving on')
                     break
+                last_page = first(data, "maxPage")
+                hits = parse_search(data)
                 new = 0
                 for h in hits:
                     key = h["seller_name"].lower()
@@ -878,6 +885,9 @@ def run_scrape(keywords, pages, active_rules, delay):
                     rec["products"][h["item_id"]] = h["item_text"]
                 log(f"  found {new} new sellers ({len(sellers)} total)")
                 publish(sellers)
+                if str(last_page).isdigit() and page >= int(last_page):
+                    log(f'  that was the last page for "{kw}"')
+                    break
 
         # Step 2: open each seller's page, get their details, apply the rules.
         for i, rec in enumerate(list(sellers.values()), 1):
@@ -1100,6 +1110,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
         <option value="3" selected>Normal: 3 pages per search</option>
         <option value="5">Deep: 5 pages per search</option>
         <option value="10">Very deep: 10 pages per search</option>
+        <option value="25">All pages: keep going until Walmart runs out (up to 25)</option>
       </select>
       <h3 style="margin-top:16px">3. Rules</h3>
       <div id="rules"></div>
@@ -1407,7 +1418,7 @@ class Handler(BaseHTTPRequestHandler):
                 if STATE["running"]:
                     return self.send('{"ok":false}')
                 STATE.update(running=True, stop=False, log=[], sellers=[], saved_file="")
-            pages = max(1, min(25, int(body.get("pages") or 3)))
+            pages = max(1, min(MAX_PAGES, int(body.get("pages") or 3)))
             threading.Thread(target=run_scrape, daemon=True,
                              args=(body["keywords"], pages, set(body.get("rules", [])), 2.0)).start()
             self.send('{"ok":true}')
