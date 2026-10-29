@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 13
+VERSION = 14
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
@@ -365,6 +365,89 @@ def seed_leads():
 
 
 seed_leads()
+
+
+# =========================================================== SEARCH HISTORY
+# One row per search word: when it was last searched, how it went, and when to check again.
+
+def history_db():
+    con = db()
+    con.execute("CREATE TABLE IF NOT EXISTS searches (keyword TEXT PRIMARY KEY, last_run TEXT NOT NULL, "
+                "runs INTEGER NOT NULL DEFAULT 0, pages INTEGER NOT NULL DEFAULT 0, sellers INTEGER NOT NULL DEFAULT 0, "
+                "new_leads INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, "
+                "already_have INTEGER NOT NULL DEFAULT 0, total_new_leads INTEGER NOT NULL DEFAULT 0)")
+    return con
+
+
+def check_again_days(new_leads):
+    return 7 if new_leads >= 5 else 14 if new_leads >= 1 else 30
+
+
+def keyword_stats(rows, kw):
+    """rows: seller rows (dicts) from one search. Counts the ones this search word found."""
+    mine = [r for r in rows if kw in [k.strip().lower() for k in
+                                      (r["keywords"] if isinstance(r["keywords"], (set, list)) else
+                                       str(r.get("keywords") or "").split(";"))]]
+    already = sum(1 for r in mine if "Already have this number" in (r.get("reason") or ""))
+    good = sum(1 for r in mine if r.get("status") == "Good")
+    rejected = sum(1 for r in mine if r.get("status") == "Rejected") - already
+    return len(mine), good, rejected, already
+
+
+def record_search(kw, when, pages, rows):
+    kw = kw.strip().lower()
+    sellers, good, rejected, already = keyword_stats(rows, kw)
+    with DB_LOCK:
+        con = history_db()
+        with con:
+            con.execute(
+                "INSERT INTO searches (keyword, last_run, runs, pages, sellers, new_leads, rejected, already_have, total_new_leads) "
+                "VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT(keyword) DO UPDATE SET last_run = excluded.last_run, "
+                "runs = runs + 1, pages = excluded.pages, sellers = excluded.sellers, new_leads = excluded.new_leads, "
+                "rejected = excluded.rejected, already_have = excluded.already_have, "
+                "total_new_leads = total_new_leads + excluded.new_leads",
+                (kw, when, pages, sellers, good, rejected, already, good))
+        con.close()
+
+
+def get_history():
+    con = history_db()
+    rows = con.execute("SELECT keyword, last_run, runs, pages, sellers, new_leads, rejected, already_have, total_new_leads "
+                       "FROM searches").fetchall()
+    con.close()
+    out = []
+    for kw, last, runs, pages, sellers, good, rejected, already, total in rows:
+        days = check_again_days(good)
+        due = datetime.strptime(last[:10], "%Y-%m-%d").toordinal() + days
+        out.append({"keyword": kw, "last_run": last, "runs": runs, "pages": pages, "sellers": sellers, "new_leads": good,
+                    "rejected": rejected, "already_have": already, "total_new_leads": total, "check_every": days,
+                    "check_again": datetime.fromordinal(due).strftime("%Y-%m-%d"),
+                    "due": due <= datetime.now().toordinal()})
+    out.sort(key=lambda h: (not h["due"], h["check_again"]))
+    return out
+
+
+def seed_history():
+    """First time the history exists: fill it in from earlier searches' spreadsheets."""
+    con = db()
+    exists = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'searches'").fetchone()
+    con.close()
+    if exists:
+        return
+    history_db().close()
+    for f in sorted(HERE.glob("walmart_sellers_*.csv"), key=lambda f: f.stat().st_mtime):
+        try:
+            rows = list(csv.DictReader(io.StringIO(f.read_text(encoding="utf-8", errors="ignore"))))
+        except Exception:
+            continue
+        if not rows or "status" not in rows[0]:
+            continue
+        when = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        for kw in sorted({k.strip().lower() for r in rows for k in str(r.get("keywords") or "").split(";") if k.strip()}):
+            record_search(kw, when, 0, rows)
+
+
+seed_history()
 
 
 def lookup(q, limit=50):
@@ -739,11 +822,15 @@ class Browser:
 def run_scrape(keywords, pages, active_rules, delay):
     sellers = {}
     RUN_PHONES.clear()
+    searched = []  # search words that actually ran, for the search history
+    started = datetime.now().strftime("%Y-%m-%d %H:%M")
     br = None
     try:
         br = Browser(delay)
         # Step 1: find sellers in search results.
         for kw in keywords:
+            if not STATE["stop"]:
+                searched.append(kw)
             for page in range(1, pages + 1):
                 if STATE["stop"]:
                     break
@@ -815,6 +902,11 @@ def run_scrape(keywords, pages, active_rules, delay):
     finally:
         if br:
             br.close()
+        try:
+            for kw in searched:
+                record_search(kw, started, pages, list(sellers.values()))
+        except Exception as e:
+            log(f"Couldn't save search history: {e}")
         with LOCK:
             STATE["running"] = False
             STATE["stop"] = False
@@ -928,6 +1020,13 @@ a{color:var(--blue)}
       style="width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit">
     <div id="lookupOut" style="margin-top:10px"></div>
   </div>
+</div>
+<div class="card">
+  <label class="h">Search history</label>
+  <div class="hint" style="margin-bottom:10px">When to check a search word again: 1 week if it found 5+ new leads last time, 2 weeks if 1-4, 1 month if none.</div>
+  <div class="tablewrap"><table><thead><tr>
+    <th>Search word</th><th>Last searched</th><th>Times</th><th>Sellers found</th><th>New leads</th><th>Total new leads</th><th>Check again</th><th></th>
+  </tr></thead><tbody id="history"></tbody></table></div>
 </div>
 <div class="card"><label class="h">What it's doing</label><div id="log"></div></div>
 <div class="card">
@@ -1044,6 +1143,24 @@ function draw(){
     <td>${action(x)}</td></tr>`).join("")
     :`<tr><td colspan="7" class="empty">Nothing here yet.</td></tr>`;
 }
+let history=[], wasRunning=false;
+async function loadHistory(){
+  history=await (await fetch("/history")).json();
+  document.getElementById("history").innerHTML=history.length?history.map(h=>`<tr>
+    <td><b>${esc(h.keyword)}</b></td><td style="white-space:nowrap">${esc(h.last_run)}</td><td>${h.runs}</td>
+    <td>${h.sellers}${h.already_have?` <span class="hint">(${h.already_have} already had)</span>`:""}</td>
+    <td>${h.new_leads}</td><td>${h.total_new_leads}</td>
+    <td style="white-space:nowrap">${h.due?`<span class="good">Due now</span>`:esc(h.check_again)}</td>
+    <td><button class="dl" data-kw="${esc(h.keyword)}" style="white-space:nowrap">Search again</button></td></tr>`).join("")
+    :`<tr><td colspan="8" class="empty">No searches yet.</td></tr>`;
+}
+document.getElementById("history").onclick=e=>{
+  const b=e.target.closest("button[data-kw]");if(!b)return;
+  const box=document.getElementById("kw"),words=box.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if(!words.map(w=>w.toLowerCase()).includes(b.dataset.kw))words.push(b.dataset.kw);
+  box.value=words.join("\n");box.scrollIntoView({behavior:"smooth",block:"center"});
+};
+loadHistory();
 async function poll(){
   data=await (await fetch("/status")).json();
   document.getElementById("start").disabled=data.running;
@@ -1051,6 +1168,8 @@ async function poll(){
   document.getElementById("status").textContent=data.running?"Running... (Chrome works minimized in the Dock and only pops up if Walmart needs you to press & hold)":(data.saved_file?"Last results saved to "+data.saved_file:"");
   const log=document.getElementById("log"),atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-5;
   log.textContent=data.log.join("\n");if(atBottom)log.scrollTop=log.scrollHeight;
+  if(wasRunning&&!data.running)loadHistory();
+  wasRunning=data.running;
   if(data.leads_new!==leads.new.length||data.leads_added!==leads.added.length)loadLeads();
   document.getElementById("nKnown").textContent=(data.known_count||0).toLocaleString();
   document.getElementById("update").style.display=data.update_available?"flex":"none";
@@ -1090,6 +1209,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(json.dumps(status, default=str))
         elif url.path == "/lookup":
             self.send(json.dumps(lookup(parse_qs(url.query).get("q", [""])[0])))
+        elif url.path == "/history":
+            self.send(json.dumps(get_history()))
         elif url.path == "/leads":
             self.send(json.dumps(get_leads(parse_qs(url.query).get("status", ["new"])[0]), default=str))
         elif url.path == "/download":
