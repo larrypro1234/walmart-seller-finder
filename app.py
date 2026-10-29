@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 18
+VERSION = 19
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -836,14 +836,19 @@ def watch_for_updates():
 
 # ============================================================== SCRAPER
 
-STATE = {"running": False, "stop": False, "log": [], "sellers": [], "saved_file": "", "update_available": ""}
+STATE = {"running": False, "stop": False, "log": [], "sellers": [], "saved_file": "", "update_available": "", "summary": ""}
 LOCK = threading.Lock()
 
 
 def log(msg):
     with LOCK:
         STATE["log"].append(datetime.now().strftime("%H:%M:%S ") + msg)
-        STATE["log"] = STATE["log"][-300:]
+        STATE["log"] = STATE["log"][-1000:]
+        try:
+            with open(HERE / "search_log.txt", "a", encoding="utf-8") as f:
+                f.write(datetime.now().strftime("%Y-%m-%d ") + STATE["log"][-1] + "\n")
+        except OSError:
+            pass
 
 
 class Browser:
@@ -938,7 +943,7 @@ def add_found_seller(sellers, name, catalog_id, kw, found_from, found_from_url, 
     return int(new)
 
 
-def find_hidden_sellers(br, products, sellers):
+def find_hidden_sellers(br, products, sellers, stats):
     with_signal = [pid for pid, p in products.items() if p["signal"] is not None]
     if with_signal:  # Walmart says which products have more than one seller: only open those
         todo = [pid for pid in with_signal if products[pid]["signal"] > 1]
@@ -947,6 +952,7 @@ def find_hidden_sellers(br, products, sellers):
         todo = list(products)
         log(f"Finding hidden sellers: checking all {len(todo)} products")
     found_any = False
+    stats["hidden_to_check"] = len(todo)
     for n, pid in enumerate(todo, 1):
         if STATE["stop"]:
             break
@@ -962,11 +968,14 @@ def find_hidden_sellers(br, products, sellers):
         new = sum(add_found_seller(sellers, o["seller_name"], o["catalog_seller_id"], p["kw"],
                                    f'"{p["label"]}" more sellers on: {p["name"]}', p["url"], pid, p["name"])
                   for o in offers)
+        stats["hidden_checked"] = n
+        stats["hidden_found"] += new
         if new:
             log(f"  found {new} hidden sellers ({len(sellers)} total)")
             publish(sellers)
         if n == 10 and not found_any:
             log("  Couldn't find Walmart's all-sellers lists on these pages, so skipping hidden sellers")
+            stats["hidden_note"] = "Walmart's more-sellers lists couldn't be read, so this step was skipped"
             break
 
 
@@ -980,6 +989,8 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
         br = Browser(delay)
         # Step 1: find sellers in search results.
         products = {}  # every product seen: id -> {name, url, kw, label, sellers}
+        stats = {"searches": 0, "pages": 0, "splits": 0, "price_filter": "not used", "hidden_to_check": 0,
+                 "hidden_checked": 0, "hidden_found": 0, "hidden_note": "", "blocked_pages": 0}
         for kw in keywords:
             if STATE["stop"]:
                 break
@@ -997,6 +1008,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
                 if band and skip_bands:
                     continue
                 pages_with_results, last_page = 0, None
+                stats["searches"] += 1
                 for page in range(1, pages + 1):
                     if STATE["stop"]:
                         break
@@ -1009,12 +1021,17 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
                     ids = {str(d["usItemId"]) for d in items}
                     if not ids:
                         log(f'  no more results for "{label}"' if html else f"  couldn't load page {page}, moving on")
+                        stats["blocked_pages"] += 0 if html else 1
                         break
+                    stats["pages"] += 1
                     if band and page == 1:
                         if first_ids is not None and ids == first_ids:
                             log("  Walmart ignored the price filter, so skipping the other price ranges")
+                            stats["price_filter"] = "ignored by Walmart"
                             skip_bands = True
                             break
+                        if first_ids is not None and stats["price_filter"] == "not used":
+                            stats["price_filter"] = "worked"
                         first_ids = first_ids if first_ids is not None else ids
                     pages_with_results += 1
                     last_page = first(data, "maxPage")
@@ -1040,10 +1057,24 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
                     if halves:
                         log(f'  "{label}" has more than {MAX_PAGES} pages, so splitting it into smaller price ranges')
                         plan[i:i] = [band_entry(entry["kw"], lo, hi) for lo, hi in halves]
+                        stats["splits"] += 1
 
         # Step 1b: open each product's all-sellers list to find sellers search doesn't show.
+        from_search = len(sellers)
         if hidden_sellers and products and not STATE["stop"]:
-            find_hidden_sellers(br, products, sellers)
+            find_hidden_sellers(br, products, sellers, stats)
+        parts = [f"{stats['searches']} searches", f"{stats['pages']} pages", f"{len(products):,} products seen",
+                 f"{from_search} sellers from search results"]
+        if every_corner:
+            parts.append(f"price search {stats['price_filter']}")
+            parts.append(f"{stats['splits']} price ranges split")
+        if hidden_sellers:
+            parts.append(stats["hidden_note"] or f"hidden sellers: checked {stats['hidden_checked']} of "
+                         f"{stats['hidden_to_check']} products, found {stats['hidden_found']} more sellers")
+        if stats["blocked_pages"]:
+            parts.append(f"{stats['blocked_pages']} pages didn't load")
+        STATE["summary"] = " · ".join(parts)
+        log("Summary: " + STATE["summary"])
 
         # Step 2: open each seller's page, get their details, apply the rules.
         for i, rec in enumerate(list(sellers.values()), 1):
@@ -1286,6 +1317,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
 <div class="card">
   <h2>Latest search results</h2>
   <p class="sub" id="lastInfo">Good sellers from here are also added to Leads automatically.</p>
+  <div id="summary" class="answer" style="display:none;background:var(--blue-soft);color:var(--text);font-weight:500;margin:0 0 14px"></div>
   <div class="pills">
     <button class="pill on" data-r="Good">Good <span id="nGood">0</span></button>
     <button class="pill" data-r="Rejected">Rejected <span id="nRejected">0</span></button>
@@ -1404,6 +1436,7 @@ function drawResults(){
     <td>${sellerCell(x)}</td><td>${contactCell(x)}</td><td>${placeCell(x)}</td><td>${ratingCell(x)}</td>
     <td style="text-align:right">${resView==="Rejected"?`<div class="why" style="text-align:left;max-width:240px">${esc(x.reason)}</div>`:storeBtn(x)}</td></tr>`).join("")
     :`<tr><td colspan="5" class="empty">Nothing here.</td></tr>`;
+  $("summary").style.display=data.summary?"":"none";$("summary").textContent=data.summary?"Last search: "+data.summary:"";
   $("lastInfo").textContent=data.saved_file?`Saved to ${data.saved_file} in your walmart folder. Good sellers are also added to Leads.`:"Good sellers from here are also added to Leads automatically.";
 }
 
@@ -1530,7 +1563,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps([{"id": r["id"], "label": r["label"]} for r in RULES]))
         elif url.path == "/status":
             with LOCK:
-                status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available")}
+                status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available", "summary")}
                 status["known_count"] = len(KNOWN)
                 counts = lead_counts()
                 status["leads_new"], status["leads_added"] = counts.get("new", 0), counts.get("added", 0)
@@ -1577,7 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if STATE["running"]:
                     return self.send('{"ok":false}')
-                STATE.update(running=True, stop=False, log=[], sellers=[], saved_file="")
+                STATE.update(running=True, stop=False, log=[], sellers=[], saved_file="", summary="")
             pages = max(1, min(MAX_PAGES, int(body.get("pages") or 3)))
             threading.Thread(target=run_scrape, daemon=True,
                              args=(body["keywords"], pages, set(body.get("rules", [])), 2.0, bool(body.get("every_corner")),
