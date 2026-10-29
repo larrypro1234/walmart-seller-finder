@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 22
+VERSION = 23
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -408,6 +408,21 @@ def record_search(kw, when, pages, rows):
                 "rejected = excluded.rejected, already_have = excluded.already_have, "
                 "total_new_leads = total_new_leads + excluded.new_leads",
                 (kw, when, pages, sellers, good, rejected, already, good))
+        con.close()
+
+
+def refresh_search(kw, rows):
+    """Update a search word's latest numbers after Finish checking (without counting a new search)."""
+    kw = kw.strip().lower()
+    sellers, good, rejected, already = keyword_stats(rows, kw)
+    with DB_LOCK:
+        con = history_db()
+        with con:
+            old = con.execute("SELECT new_leads FROM searches WHERE keyword = ?", (kw,)).fetchone()
+            if old:
+                con.execute("UPDATE searches SET sellers = ?, new_leads = ?, rejected = ?, already_have = ?, "
+                            "total_new_leads = total_new_leads - ? + ? WHERE keyword = ?",
+                            (sellers, good, rejected, already, old[0], good, kw))
         con.close()
 
 
@@ -1107,6 +1122,8 @@ def run_finish(active_rules, delay):
         left = sum(1 for s in sellers.values() if s["status"] == "Checking...")
         log(f"Done! {good} good sellers in this search" + (f", {left} still not checked" if left else "") +
             f". Saved to {STATE['saved_file']}")
+        for kw in {k.strip().lower() for r in sellers.values() for k in r["keywords"]}:
+            refresh_search(kw, list(sellers.values()))
     except Exception as e:
         log(f"Something went wrong: {e}")
         save_csv(sellers)
