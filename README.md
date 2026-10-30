@@ -29,6 +29,9 @@ Search results show one seller per product. With **Find hidden sellers** ticked,
 ## Layout
 The app has four sections: **Leads** (the inbox), **Search** (search box, brand ideas, rules, latest results), **History** (search history and what's due), and **Numbers** (look up and upload numbers). Brand ideas live in `BRAND_IDEAS` in `app.py`.
 
+## Shared database
+The numbers, leads and search history live in `~/SellerFinderData/numbers.db`, shared with the Amazon seller finder on the same computer, so both apps know which sellers we already have and never add the same lead twice. `SHARED_DATABASE.md` is the contract the other app follows.
+
 ## Running it (Mac)
 Double-click the **Walmart Seller Finder** icon on the Desktop. The app opens in your browser.
 Click **Quit app** in the top right to turn it off.
