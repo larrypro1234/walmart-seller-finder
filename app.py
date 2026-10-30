@@ -926,7 +926,13 @@ def watch_for_updates():
 
 # ============================================================== SCRAPER
 
-STATE = {"running": False, "stop": False, "log": [], "sellers": [], "saved_file": "", "update_available": "", "summary": ""}
+STATE = {"running": False, "stop": False, "skip_search": False, "log": [], "sellers": [], "saved_file": "",
+         "update_available": "", "summary": ""}
+
+
+def still_searching():
+    """False once Stop or "Stop searching & check now" was pressed."""
+    return not STATE["stop"] and not STATE["skip_search"]
 LOCK = threading.Lock()
 
 
@@ -1081,7 +1087,7 @@ def find_hidden_sellers(br, products, sellers, stats):
     found_any = False
     stats["hidden_to_check"] = len(todo)
     for n, pid in enumerate(todo, 1):
-        if STATE["stop"]:
+        if not still_searching():
             break
         p = products[pid]
         log(f"More sellers {n}/{len(todo)}: {p['name'][:60]}")
@@ -1200,6 +1206,7 @@ def run_finish(active_rules, delay):
         with LOCK:
             STATE["running"] = False
             STATE["stop"] = False
+            STATE["skip_search"] = False
 
 
 def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_sellers=False):
@@ -1215,7 +1222,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
         stats = {"searches": 0, "pages": 0, "splits": 0, "price_filter": "not used", "hidden_to_check": 0,
                  "hidden_checked": 0, "hidden_found": 0, "hidden_note": "", "blocked_pages": 0}
         for kw in keywords:
-            if STATE["stop"]:
+            if not still_searching():
                 break
             searched.append(kw)
             plan = search_plan(kw, every_corner)
@@ -1224,7 +1231,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
             first_ids = None  # first-page products of the first price range, to spot an ignored price filter
             skip_bands = False
             i = 0
-            while i < len(plan) and not STATE["stop"]:
+            while i < len(plan) and still_searching():
                 entry = plan[i]
                 i += 1
                 label, band = entry["label"], entry["band"]
@@ -1233,7 +1240,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
                 pages_with_results, last_page = 0, None
                 stats["searches"] += 1
                 for page in range(1, pages + 1):
-                    if STATE["stop"]:
+                    if not still_searching():
                         break
                     log(f'Searching "{label}" - page {page}')
                     html = br.get(f"{entry['url']}&page={page}")
@@ -1289,8 +1296,10 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
 
         # Step 1b: open each product's all-sellers list to find sellers search doesn't show.
         from_search = len(sellers)
-        if hidden_sellers and products and not STATE["stop"]:
+        if hidden_sellers and products and still_searching():
             find_hidden_sellers(br, products, sellers, stats)
+        if STATE["skip_search"] and not STATE["stop"]:
+            log(f"Stopped searching early, now checking the {len(sellers)} sellers found so far")
         parts = [f"{stats['searches']} searches", f"{stats['pages']} pages", f"{len(products):,} products seen",
                  f"{from_search} sellers from search results"]
         if every_corner:
@@ -1324,6 +1333,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
         with LOCK:
             STATE["running"] = False
             STATE["stop"] = False
+            STATE["skip_search"] = False
 
 
 COLUMNS = ["status", "reason", "marketplace", "seller_name", "business_name", "phone", "email", "address", "country",
@@ -1449,6 +1459,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
     <div class="progress"><div id="runBar"></div></div>
     <div class="muted" style="margin-top:6px">Chrome works minimized in your Dock. If it pops up asking you to "Press &amp; Hold", hold the button and it carries on.</div>
   </div>
+  <button id="skip" class="primary" style="display:none">Stop searching &amp; check now</button>
   <button id="stop">Stop</button>
 </div>
 
@@ -1626,6 +1637,7 @@ $("start").onclick=async()=>{
   poll();
 };
 $("stop").onclick=()=>fetch("/stop",{method:"POST"});
+$("skip").onclick=()=>{fetch("/skip",{method:"POST"});$("skip").style.display="none";};
 $("finish").onclick=async()=>{
   const rules=[...document.querySelectorAll("#rules input:checked")].map(i=>i.value);
   await fetch("/finish",{method:"POST",body:JSON.stringify({rules})});poll();
@@ -1747,6 +1759,7 @@ async function poll(){
   if(data.running){
     const s=data.sellers,left=s.filter(x=>x.status==="Checking...").length,done=s.length-left,last=data.log[data.log.length-1]||"";
     const checking=/Checking seller/.test(last)||done>0;
+    $("skip").style.display=checking?"none":"";
     $("runTitle").textContent=checking?`Checking sellers: ${done} of ${s.length} done`:`Searching Walmart... ${s.length} sellers found so far`;
     $("runDetail").textContent=last.replace(/^\d\d:\d\d:\d\d /,"");
     $("runBar").style.width=(checking&&s.length?Math.round(100*done/s.length):5)+"%";
@@ -1835,7 +1848,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if STATE["running"]:
                     return self.send('{"ok":false}')
-                STATE.update(running=True, stop=False, log=[], sellers=[], saved_file="", summary="")
+                STATE.update(running=True, stop=False, skip_search=False, log=[], sellers=[], saved_file="", summary="")
             pages = max(1, min(MAX_PAGES, int(body.get("pages") or 3)))
             threading.Thread(target=run_scrape, daemon=True,
                              args=(body["keywords"], pages, set(body.get("rules", [])), 2.0, bool(body.get("every_corner")),
@@ -1850,6 +1863,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send('{"ok":false}')
                 STATE.update(running=True, stop=False, log=[], summary="")
             threading.Thread(target=run_finish, daemon=True, args=(set(body.get("rules", [])), 2.0)).start()
+            self.send('{"ok":true}')
+        elif self.path == "/skip":
+            if STATE["running"]:
+                STATE["skip_search"] = True
+                log("Stopping the search after this page, then checking the sellers found so far...")
             self.send('{"ok":true}')
         elif self.path == "/stop":
             STATE["stop"] = True
