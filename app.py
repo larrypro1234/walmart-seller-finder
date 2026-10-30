@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 23
+VERSION = 24
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
@@ -1442,6 +1442,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
   <h2>Latest search results</h2>
   <p class="sub" id="lastInfo">Good sellers from here are also added to Leads automatically.</p>
   <div id="summary" class="answer" style="display:none;background:var(--blue-soft);color:var(--text);font-weight:500;margin:0 0 14px"></div>
+  <div id="breakdown" class="chips" style="margin:0 0 14px"></div>
   <div class="pills">
     <button class="pill on" data-r="Good">Good <span id="nGood">0</span></button>
     <button class="pill" data-r="Rejected">Rejected <span id="nRejected">0</span></button>
@@ -1556,8 +1557,25 @@ $("finish").onclick=async()=>{
   const rules=[...document.querySelectorAll("#rules input:checked")].map(i=>i.value);
   await fetch("/finish",{method:"POST",body:JSON.stringify({rules})});poll();
 };
+// Why sellers in the latest search didn't become leads, grouped into a few plain reasons.
+function reasonGroup(x){
+  if(x.status==="Good")return "New leads";
+  if(x.status==="Checking...")return "Not checked yet";
+  const r=x.reason||"";
+  if(/Already have this number|Same phone as/.test(r))return "Already have";
+  if(/Not a US seller|Country not shown/.test(r))return "Not US / no US address";
+  if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
+  return "Other";
+}
+function drawBreakdown(){
+  const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Not checked yet","Other"];
+  $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
+    `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
+}
 function drawResults(){
   const s=data.sellers;
+  drawBreakdown();
   for(const [k,id] of [["Good","nGood"],["Rejected","nRejected"],["Checking...","nChecking"]])$(id).textContent=s.filter(x=>x.status===k).length;
   const unchecked=s.filter(x=>x.status==="Checking...").length+s.filter(x=>x.status==="Rejected"&&x.reason==="Country not shown on seller page").length;
   $("checkLabel").textContent=data.running?"Still checking":"Not checked";
