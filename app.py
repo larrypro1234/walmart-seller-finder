@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 26
+VERSION = 27
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -602,6 +602,36 @@ def known_count():
     return n
 
 
+def amazon_lead_waiting(phone):
+    """True if this number is an Amazon lead that hasn't been given to a rep yet.
+    Walmart wins: when Walmart finds the same seller, it takes that lead over."""
+    con = leads_db()
+    hit = con.execute("SELECT data FROM leads WHERE key = ? AND status = 'new'", (phone,)).fetchone()
+    con.close()
+    if not hit:
+        return False
+    try:
+        return json.loads(hit[0]).get("marketplace") == "Amazon"
+    except ValueError:
+        return False
+
+
+def take_over_lead(r, phone):
+    """Replace a waiting Amazon lead with this Walmart one. Returns False if a rep got it meanwhile."""
+    now = datetime.now()
+    with DB_LOCK:
+        con = leads_db()
+        with con:
+            changed = con.execute("UPDATE leads SET data = ?, found = ? WHERE key = ? AND status = 'new'",
+                                  (json.dumps(r), now.strftime("%Y-%m-%d %H:%M"), phone)).rowcount
+            if changed:
+                con.execute("UPDATE numbers SET details = ?, source = ?, added = ? WHERE phone = ?",
+                            (f"{r['seller_name']} · {r.get('address', '')} · {r.get('seller_url', '')}",
+                             "Found by app (took over from Amazon)", now.strftime("%Y-%m-%d"), phone))
+        con.close()
+    return bool(changed)
+
+
 def rule_no_duplicate_phone(s):
     p = normalize_phone(s.get("phone"))
     if not p:
@@ -610,6 +640,9 @@ def rule_no_duplicate_phone(s):
     if other and other != s["seller_name"]:
         return f"Same phone as {other}"
     if other != s["seller_name"] and is_known(p):
+        if amazon_lead_waiting(p):
+            s["take_over"] = True  # Walmart wins over an Amazon lead nobody has worked yet
+            return None
         return "Already have this number"
     return None
 
@@ -1141,9 +1174,16 @@ def check_seller(br, rec, active_rules):
     reasons = [r for r in reasons if r]
     rec["status"] = "Rejected" if reasons else "Good"
     rec["reason"] = "; ".join(reasons)
-    if rec["status"] == "Good":
-        add_lead(row(rec))
     phone = normalize_phone(rec.get("phone"))
+    took_over = rec.pop("take_over", False)
+    if rec["status"] == "Good" and took_over:
+        if take_over_lead(row(rec), phone):
+            rec["reason"] = "Took over this lead from Amazon"
+            log(f"  {rec['seller_name']} was an Amazon lead: Walmart takes it over")
+        else:  # a rep picked up the Amazon lead in the meantime: leave it with Amazon
+            rec["status"], rec["reason"] = "Rejected", "Already have this number"
+    elif rec["status"] == "Good":
+        add_lead(row(rec))
     if rec["status"] == "Good" and phone:
         RUN_PHONES[phone] = rec["seller_name"]
         add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],

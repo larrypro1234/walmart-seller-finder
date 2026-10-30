@@ -144,9 +144,11 @@ def add_lead(lead):
 
 `marketplace` must be `"Amazon"` for every Amazon lead. `seller_url` is the seller's own storefront page.
 
-## Same seller found by both apps
+## Same seller found by both apps: Walmart wins
 
-Nothing special to do: the phone number check (`is_known`) and `INSERT OR IGNORE` on leads mean whichever app finds the seller first wins, and the other one sees "Already have this number".
+- If the Walmart app finds the seller first, the Amazon app sees the number in `numbers` and treats it as "Already have this number". Nothing to do.
+- If the Amazon app found the seller first and its lead is still `status = 'new'`, the Walmart app **takes the lead over**: it rewrites that lead's `data` with its own (marketplace `Walmart`) and changes the number's `source` to `Found by app (took over from Amazon)`. This is expected. The Amazon app must not undo it or add the seller again (it won't, if it follows this page: `is_known` is true and leads use `INSERT OR IGNORE`).
+- If the Amazon lead was already given to a rep (`status = 'added'`), the Walmart app leaves it alone.
 
 ## Search history
 
