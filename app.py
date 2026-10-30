@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -34,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 25
+VERSION = 26
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -201,7 +202,41 @@ def rule_store_categories(s):
 # database next to app.py), never on GitHub. Each number remembers the rest of the
 # spreadsheet row it came from, which file, and when. Good sellers found by the app
 # are added automatically.
-DB_FILE = HERE / "numbers.db"
+# The database lives in a shared folder so the other seller finder on this computer
+# (the Amazon one) uses the same numbers and leads. See SHARED_DATABASE.md.
+DATA_DIR = Path.home() / "SellerFinderData"
+DB_FILE = DATA_DIR / "numbers.db"
+OLD_DB_FILE = HERE / "numbers.db"  # versions 9-25 kept it next to app.py
+MARKETPLACE = "Walmart"
+
+
+def move_database():
+    """One time: move this app's database into the shared folder, keeping the old file as a backup.
+    If the other app already made the shared database, merge ours into it instead (nothing is overwritten)."""
+    DATA_DIR.mkdir(exist_ok=True)
+    if not OLD_DB_FILE.exists():
+        return
+    if not DB_FILE.exists():
+        shutil.copy2(OLD_DB_FILE, DB_FILE)
+    else:
+        con = sqlite3.connect(str(DB_FILE), timeout=30)
+        con.execute("ATTACH DATABASE ? AS old", (str(OLD_DB_FILE),))
+        tables = {r[0] for r in con.execute("SELECT name FROM old.sqlite_master WHERE type = 'table'")}
+        main_tables = {r[0] for r in con.execute("SELECT name FROM main.sqlite_master WHERE type = 'table'")}
+        with con:
+            for t in tables:
+                if t in main_tables:
+                    con.execute(f"INSERT OR IGNORE INTO main.{t} SELECT * FROM old.{t}")
+                else:
+                    sql = con.execute("SELECT sql FROM old.sqlite_master WHERE name = ?", (t,)).fetchone()[0]
+                    con.execute(sql)
+                    con.execute(f"INSERT INTO main.{t} SELECT * FROM old.{t}")
+        con.execute("DETACH DATABASE old")
+        con.close()
+    OLD_DB_FILE.rename(HERE / "numbers-backup-before-move.db")
+
+
+move_database()
 OLD_KNOWN_FILE = HERE / "known_numbers.txt"  # versions 7-8 kept bare numbers here
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)")
 DB_LOCK = threading.Lock()
@@ -219,7 +254,8 @@ def pretty_phone(p):
 
 
 def db():
-    con = sqlite3.connect(str(DB_FILE))
+    con = sqlite3.connect(str(DB_FILE), timeout=30)  # if the other app is writing, wait for it
+    con.execute("PRAGMA journal_mode=WAL")  # lets both apps read and write at the same time
     con.execute("CREATE TABLE IF NOT EXISTS numbers (phone TEXT PRIMARY KEY, details TEXT NOT NULL DEFAULT '', "
                 "source TEXT NOT NULL DEFAULT '', added TEXT NOT NULL DEFAULT '')")
     return con
@@ -546,6 +582,26 @@ def phones_in_file(name, raw):
     return found
 
 
+def is_known(phone):
+    """True if the number is in the shared database. Checks the database itself, not just this
+    app's memory, because the other app may have added it a moment ago."""
+    if phone in KNOWN:
+        return True
+    con = db()
+    hit = con.execute("SELECT 1 FROM numbers WHERE phone = ?", (phone,)).fetchone()
+    con.close()
+    if hit:
+        KNOWN.add(phone)
+    return bool(hit)
+
+
+def known_count():
+    con = db()
+    n = con.execute("SELECT COUNT(*) FROM numbers").fetchone()[0]
+    con.close()
+    return n
+
+
 def rule_no_duplicate_phone(s):
     p = normalize_phone(s.get("phone"))
     if not p:
@@ -553,7 +609,7 @@ def rule_no_duplicate_phone(s):
     other = RUN_PHONES.get(p)
     if other and other != s["seller_name"]:
         return f"Same phone as {other}"
-    if p in KNOWN and other != s["seller_name"]:
+    if other != s["seller_name"] and is_known(p):
         return "Already have this number"
     return None
 
@@ -1086,7 +1142,7 @@ def check_seller(br, rec, active_rules):
         RUN_PHONES[phone] = rec["seller_name"]
         add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],
                   "Found by app")
-    elif phone and phone not in KNOWN and blocking_reason(rec["reason"]):
+    elif phone and not is_known(phone) and blocking_reason(rec["reason"]):
         add_known([(phone, f"Rejected: {rec['reason']} · {rec['seller_name']} · {rec.get('address', '')} · "
                            f"{rec.get('seller_url', '')}")], "Rejected by app")
     return True
@@ -1270,13 +1326,14 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
             STATE["stop"] = False
 
 
-COLUMNS = ["status", "reason", "seller_name", "business_name", "phone", "email", "address", "country",
+COLUMNS = ["status", "reason", "marketplace", "seller_name", "business_name", "phone", "email", "address", "country",
            "rating", "review_count", "seller_url", "catalog_seller_id", "products_checked", "store_mix", "keywords",
            "found_from", "found_from_url"]
 
 
 def row(rec):
     r = {k: rec.get(k, "") for k in COLUMNS}
+    r["marketplace"] = MARKETPLACE
     r["products_checked"] = len(rec.get("products", {}))
     r["keywords"] = "; ".join(sorted(rec.get("keywords", [])))
     return r
@@ -1521,7 +1578,7 @@ document.querySelectorAll("[data-r]").forEach(b=>b.onclick=()=>{resView=b.datase
 
 // ---- shared row pieces
 function sellerCell(x){
-  return `<div class="name">${esc(x.seller_name)}</div>`+
+  return `<div class="name">${esc(x.seller_name)}${x.marketplace?` <span class="tag" style="vertical-align:middle">${esc(x.marketplace)}</span>`:""}</div>`+
     (x.business_name&&x.business_name!==x.seller_name?`<div class="muted">${esc(x.business_name)}</div>`:"")+
     (x.store_mix?`<div>${x.store_mix.split(" · ").map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:"")+
     (x.found_from?`<div class="muted" style="margin-top:4px">Found from <a href="${esc(x.found_from_url)}" target="_blank">${esc(x.found_from)}</a></div>`:"");
@@ -1732,7 +1789,7 @@ class Handler(BaseHTTPRequestHandler):
             maybe_check_for_update()
             with LOCK:
                 status = {k: STATE[k] for k in ("running", "log", "sellers", "saved_file", "update_available", "summary")}
-                status["known_count"] = len(KNOWN)
+                status["known_count"] = known_count()
                 counts = lead_counts()
                 status["leads_new"], status["leads_added"] = counts.get("new", 0), counts.get("added", 0)
                 self.send(json.dumps(status, default=str))
@@ -1772,7 +1829,7 @@ class Handler(BaseHTTPRequestHandler):
             added = add_known(found, f"Uploaded: {name}")
             unique = len({p for p, _ in found})
             log(f"Uploaded {name}: {unique} numbers found, {added} new")
-            return self.send(json.dumps({"found": unique, "added": added, "total": len(KNOWN)}))
+            return self.send(json.dumps({"found": unique, "added": added, "total": known_count()}))
         body = json.loads(raw or b"{}")
         if self.path == "/start":
             with LOCK:
