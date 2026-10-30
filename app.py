@@ -34,10 +34,11 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 24
+VERSION = 25
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
-MAX_PAGES = 25  # Walmart doesn't show more than this many result pages for one search
+MAX_PAGES = 25  # never ask for more than this many result pages for one search
+FULL_SEARCH_PAGES = 9  # Walmart stops at about 10-11 pages, so a search this long was probably cut off
 WALMART_FIRST_PARTY = {"walmart.com", "walmart"}
 WALMART_FIRST_PARTY_IDS = {"F55CDC31AB754BB68FE0B39041159D63", "0"}
 
@@ -888,6 +889,7 @@ class Browser:
     def __init__(self, delay):
         self.delay = delay
         self._pw = sync_playwright().start()
+        self.loads = 0
         self._open()
 
     def _open(self):
@@ -932,8 +934,8 @@ class Browser:
         except Exception:
             return True
 
-    def reopen(self):
-        log("Chrome was closed, so opening it again")
+    def reopen(self, why="Chrome was closed, so opening it again"):
+        log(why)
         try:
             self.ctx.close()
         except Exception:
@@ -942,19 +944,28 @@ class Browser:
 
     def get(self, url):
         time.sleep(self.delay + random.uniform(0, self.delay))
-        for attempt in (1, 2):
-            if self._closed():
-                try:
-                    self.reopen()
-                except Exception as e:
-                    log(f"Couldn't open Chrome again: {e}")
-                    return None
+        self.loads += 1
+        if self.loads % 300 == 0:  # Chrome slowly uses more memory on long searches and can crash
             try:
+                self.reopen("Restarting Chrome to keep it running smoothly")
+            except Exception as e:
+                log(f"Couldn't restart Chrome: {e}")
+        for attempt in (1, 2):
+            try:
+                if self._closed():
+                    self.reopen()
                 self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 break
             except Exception as e:
-                if attempt == 1 and ("closed" in str(e).lower() or self._closed()):
-                    continue  # Chrome went away mid-load: reopen and try once more
+                msg = str(e).lower()
+                if attempt == 1 and ("closed" in msg or "crash" in msg or self._closed()):
+                    try:  # Chrome was closed or crashed: open it again and try once more
+                        self.reopen("Chrome crashed, so opening it again" if "crash" in msg else
+                                    "Chrome was closed, so opening it again")
+                    except Exception as e2:
+                        log(f"Couldn't open Chrome again: {e2}")
+                        return None
+                    continue
                 log(f"Could not load page: {e}")
                 return None
         warned = False
@@ -1205,14 +1216,19 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
                     if str(last_page).isdigit() and page >= int(last_page):
                         log(f'  that was the last page for "{label}"')
                         break
-                # Hit Walmart's page limit inside a price range? Split it so nothing is cut off.
-                capped = pages == MAX_PAGES and pages_with_results == MAX_PAGES and not (
-                    str(last_page).isdigit() and int(last_page) < MAX_PAGES)
-                if band and capped and not skip_bands:
-                    halves = split_band(*band)
-                    if halves:
-                        log(f'  "{label}" has more than {MAX_PAGES} pages, so splitting it into smaller price ranges')
-                        plan[i:i] = [band_entry(entry["kw"], lo, hi) for lo, hi in halves]
+                # Walmart only shows about 11 pages per search, so a search that long was probably
+                # cut off. Split it into smaller price ranges so the rest gets seen too.
+                capped = every_corner and pages == MAX_PAGES and pages_with_results >= FULL_SEARCH_PAGES
+                if capped and not skip_bands:
+                    if band:
+                        halves = split_band(*band)
+                        if halves:
+                            log(f'  "{label}" was cut off by Walmart, so splitting it into smaller price ranges')
+                            plan[i:i] = [band_entry(entry["kw"], lo, hi) for lo, hi in halves]
+                            stats["splits"] += 1
+                    else:
+                        log(f'  "{label}" was cut off by Walmart, so searching it by price range too')
+                        plan[i:i] = [band_entry(entry["kw"], lo, hi) for lo, hi in PRICE_BANDS]
                         stats["splits"] += 1
 
         # Step 1b: open each product's all-sellers list to find sellers search doesn't show.
