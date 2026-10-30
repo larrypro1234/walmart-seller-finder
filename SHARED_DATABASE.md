@@ -144,11 +144,29 @@ def add_lead(lead):
 
 `marketplace` must be `"Amazon"` for every Amazon lead. `seller_url` is the seller's own storefront page.
 
-## Same seller found by both apps: Walmart wins
+## Same seller found by both apps: whoever found it first keeps it
 
-- If the Walmart app finds the seller first, the Amazon app sees the number in `numbers` and treats it as "Already have this number". Nothing to do.
-- If the Amazon app found the seller first and its lead is still `status = 'new'`, the Walmart app **takes the lead over**: it rewrites that lead's `data` with its own (marketplace `Walmart`) and changes the number's `source` to `Found by app (took over from Amazon)`. This is expected. The Amazon app must not undo it or add the seller again (it won't, if it follows this page: `is_known` is true and leads use `INSERT OR IGNORE`).
-- If the Amazon lead was already given to a rep (`status = 'added'`), the Walmart app leaves it alone.
+The app that saves the number first owns that seller; the other app treats it as "Already have this number". Neither app ever takes over, rewrites or deletes the other's numbers or leads.
+
+To make this hold even when both apps find the same seller in the same second, **claim the number in one step** right before you save a lead, and only add the lead if the claim worked:
+
+```python
+def claim_number(phone, details, source="Found by Amazon app"):
+    con = db()
+    with con:
+        added = con.execute(
+            "INSERT OR IGNORE INTO numbers (phone, details, source, added) VALUES (?, ?, ?, ?)",
+            (phone, details, source, datetime.now().strftime("%Y-%m-%d"))).rowcount
+    con.close()
+    return added == 1   # False: the other app saved it first, so it's "Already have this number"
+
+if claim_number(phone, details):
+    add_lead(lead)
+```
+
+The Walmart app does exactly this.
+
+Each app shows only its own leads (the `marketplace` field), so the Walmart app doesn't show Amazon leads and the Amazon app shouldn't show Walmart leads. Both stay in the shared `leads` table.
 
 ## Search history
 

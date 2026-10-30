@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 27
+VERSION = 28
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -364,6 +364,8 @@ def get_leads(status):
     out = []
     for key, data, found, added in rows:
         r = json.loads(data)
+        if r.get("marketplace", MARKETPLACE) != MARKETPLACE:
+            continue  # the other app's leads stay in the shared database, but aren't shown here
         r.update(key=key, found_on=found, added_on=added)
         out.append(r)
     return out
@@ -379,10 +381,7 @@ def mark_leads(keys, status):
 
 
 def lead_counts():
-    con = leads_db()
-    counts = dict(con.execute("SELECT status, COUNT(*) FROM leads GROUP BY status").fetchall())
-    con.close()
-    return counts
+    return {"new": len(get_leads("new")), "added": len(get_leads("added"))}
 
 
 def seed_leads():
@@ -602,34 +601,18 @@ def known_count():
     return n
 
 
-def amazon_lead_waiting(phone):
-    """True if this number is an Amazon lead that hasn't been given to a rep yet.
-    Walmart wins: when Walmart finds the same seller, it takes that lead over."""
-    con = leads_db()
-    hit = con.execute("SELECT data FROM leads WHERE key = ? AND status = 'new'", (phone,)).fetchone()
-    con.close()
-    if not hit:
-        return False
-    try:
-        return json.loads(hit[0]).get("marketplace") == "Amazon"
-    except ValueError:
-        return False
-
-
-def take_over_lead(r, phone):
-    """Replace a waiting Amazon lead with this Walmart one. Returns False if a rep got it meanwhile."""
-    now = datetime.now()
+def claim_number(phone, details):
+    """Save a newly found number in one step. Returns False if it's already there (the other
+    app found it first, even just now), so the same number is never added twice."""
     with DB_LOCK:
-        con = leads_db()
+        con = db()
         with con:
-            changed = con.execute("UPDATE leads SET data = ?, found = ? WHERE key = ? AND status = 'new'",
-                                  (json.dumps(r), now.strftime("%Y-%m-%d %H:%M"), phone)).rowcount
-            if changed:
-                con.execute("UPDATE numbers SET details = ?, source = ?, added = ? WHERE phone = ?",
-                            (f"{r['seller_name']} · {r.get('address', '')} · {r.get('seller_url', '')}",
-                             "Found by app (took over from Amazon)", now.strftime("%Y-%m-%d"), phone))
+            added = con.execute("INSERT OR IGNORE INTO numbers (phone, details, source, added) VALUES (?, ?, ?, ?)",
+                                (phone, details, "Found by app", datetime.now().strftime("%Y-%m-%d"))).rowcount
         con.close()
-    return bool(changed)
+    if added:
+        KNOWN.add(phone)
+    return bool(added)
 
 
 def rule_no_duplicate_phone(s):
@@ -640,9 +623,6 @@ def rule_no_duplicate_phone(s):
     if other and other != s["seller_name"]:
         return f"Same phone as {other}"
     if other != s["seller_name"] and is_known(p):
-        if amazon_lead_waiting(p):
-            s["take_over"] = True  # Walmart wins over an Amazon lead nobody has worked yet
-            return None
         return "Already have this number"
     return None
 
@@ -1175,19 +1155,14 @@ def check_seller(br, rec, active_rules):
     rec["status"] = "Rejected" if reasons else "Good"
     rec["reason"] = "; ".join(reasons)
     phone = normalize_phone(rec.get("phone"))
-    took_over = rec.pop("take_over", False)
-    if rec["status"] == "Good" and took_over:
-        if take_over_lead(row(rec), phone):
-            rec["reason"] = "Took over this lead from Amazon"
-            log(f"  {rec['seller_name']} was an Amazon lead: Walmart takes it over")
-        else:  # a rep picked up the Amazon lead in the meantime: leave it with Amazon
-            rec["status"], rec["reason"] = "Rejected", "Already have this number"
-    elif rec["status"] == "Good":
+    if rec["status"] == "Good" and phone and not claim_number(
+            phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}"):
+        # the other app saved this number a moment ago: whoever found it first keeps it
+        rec["status"], rec["reason"] = "Rejected", "Already have this number"
+    if rec["status"] == "Good":
         add_lead(row(rec))
     if rec["status"] == "Good" and phone:
         RUN_PHONES[phone] = rec["seller_name"]
-        add_known([(phone, f"{rec['seller_name']} · {rec.get('address', '')} · {rec.get('seller_url', '')}")],
-                  "Found by app")
     elif phone and not is_known(phone) and blocking_reason(rec["reason"]):
         add_known([(phone, f"Rejected: {rec['reason']} · {rec['seller_name']} · {rec.get('address', '')} · "
                            f"{rec.get('seller_url', '')}")], "Rejected by app")
