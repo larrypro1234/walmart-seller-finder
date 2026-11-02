@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 31
+VERSION = 32
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -710,15 +710,20 @@ def own_brand(product_text, core):
 
 
 def rule_private_label(s):
-    core = seller_core(s.get("seller_name"))
-    if len(core) < 4 or set(core.split()) <= GENERIC_WORDS or core in established_brands():
-        return None
     texts = list(s.get("products", {}).values())
     if len(texts) < 3:
         return None
-    own = sum(1 for t in texts if own_brand(t, core))
-    if own / len(texts) >= 0.7:
-        return f"Private label: sells only its own brand ({s['seller_name']}, {own} of {len(texts)} products)"
+    words = seller_core(s.get("seller_name")).split()
+    known = established_brands()
+    # The brand can be the whole store name ("Shiny Leaf") or its start
+    # ("Life Extension" sold by "Life Extension Buyers Club").
+    for n in range(len(words), 0, -1):
+        brand = " ".join(words[:n])
+        if len(brand) < 4 or set(brand.split()) <= GENERIC_WORDS or brand in known:
+            continue
+        own = sum(1 for t in texts if own_brand(t, brand))
+        if own / len(texts) >= 0.7:
+            return f"Private label: sells only its own brand ({brand.title()}, {own} of {len(texts)} products)"
     return None
 
 
