@@ -380,6 +380,36 @@ def mark_leads(keys, status):
         con.close()
 
 
+def reject_seller(r, why):
+    """You rejected a seller by hand: take them out of Leads and block their number for good."""
+    key = lead_key(r)
+    reason = "Rejected by you" + (f": {why}" if why else "")
+    phone = normalize_phone(r.get("phone"))
+    with DB_LOCK:
+        con = leads_db()
+        with con:
+            con.execute("UPDATE leads SET status = 'rejected', added = ? WHERE key = ?",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M"), key))
+            if phone:
+                details = f"{reason} · {r.get('seller_name', '')} · {r.get('address', '')} · {r.get('seller_url', '')}"
+                con.execute("INSERT INTO numbers (phone, details, source, added) VALUES (?, ?, 'Rejected by you', ?) "
+                            "ON CONFLICT(phone) DO UPDATE SET details = excluded.details, source = excluded.source",
+                            (phone, details, datetime.now().strftime("%Y-%m-%d")))
+        con.close()
+    if phone:
+        KNOWN.add(phone)
+    # show it as rejected in this search's results too (and in its saved spreadsheet)
+    with LOCK:
+        for row_ in STATE["sellers"]:
+            if lead_key(row_) == key:
+                row_["status"], row_["reason"] = "Rejected", reason
+        rows = list(STATE["sellers"])
+    if STATE.get("saved_file") and (HERE / STATE["saved_file"]).exists():
+        (HERE / STATE["saved_file"]).write_text(to_csv(rows), encoding="utf-8")
+    log(f"You rejected {r.get('seller_name', 'a seller')}" + (f" ({why})" if why else ""))
+    return reason
+
+
 def lead_counts():
     return {"new": len(get_leads("new")), "added": len(get_leads("added"))}
 
@@ -1465,7 +1495,7 @@ header h1{font-size:22px;margin:0}header h1 small{font-size:13px;color:var(--mut
 button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:9px 16px;cursor:pointer;background:var(--soft);color:var(--text)}
 button:hover{filter:brightness(.97)}button:disabled{opacity:.45;cursor:default}
 .primary{background:var(--blue);color:#fff}.big{font-size:17px;padding:14px 28px}
-.ok{background:var(--green-soft);color:var(--green)}.small{font-size:13px;padding:6px 12px}
+.ok{background:var(--green-soft);color:var(--green)}.rej{background:var(--red-soft);color:var(--red)}.small{font-size:13px;padding:6px 12px}
 a{color:var(--blue)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:14px}
 h2{font-size:19px;margin:0 0 2px}h3{font-size:15px;margin:0 0 8px}
@@ -1681,11 +1711,23 @@ function drawLeads(){
   $("leadRows").innerHTML=list.length?list.map(x=>`<tr>
     <td>${sellerCell(x)}</td><td>${contactCell(x)}</td><td>${placeCell(x)}</td><td>${ratingCell(x)}</td>
     <td style="white-space:nowrap;text-align:right">${storeBtn(x)}
-      ${leadView==="new"?` <button class="ok small" data-key="${esc(x.key)}" data-to="added">Added to queue ✓</button><div class="muted" style="margin-top:6px">Found ${esc(x.found_on)}</div>`
+      ${leadView==="new"?` <button class="ok small" data-key="${esc(x.key)}" data-to="added">Added to queue ✓</button> <button class="small rej" data-rej="${esc(x.key)}">Reject</button><div class="muted" style="margin-top:6px">Found ${esc(x.found_on)}</div>`
         :` <button class="small" data-key="${esc(x.key)}" data-to="new">Undo</button><div class="muted" style="margin-top:6px">Added ${esc(x.added_on)}</div>`}</td></tr>`).join("")
     :`<tr><td colspan="5" class="empty">${leadView==="new"?"No new leads right now. Go to <b>Search</b> to find more.":"Nothing added to a queue yet."}</td></tr>`;
 }
-$("leadRows").onclick=e=>{const b=e.target.closest("button[data-key]");if(b)mark([b.dataset.key],b.dataset.to);};
+$("leadRows").onclick=e=>{
+  const r=e.target.closest("button[data-rej]");
+  if(r){const x=leads.new.find(l=>l.key===r.dataset.rej);if(x)rejectSeller(x).then(()=>loadLeads());return;}
+  const b=e.target.closest("button[data-key]");if(b)mark([b.dataset.key],b.dataset.to);
+};
+// Reject a seller by hand: they leave Leads and their number is blocked for good.
+async function rejectSeller(x){
+  const why=prompt(`Reject ${x.seller_name}?\n\nThey'll leave your Leads and won't come back.\nWhy? (optional, e.g. "private label")`,"");
+  if(why===null)return false;
+  const r=await (await fetch("/reject",{method:"POST",body:JSON.stringify({seller:x,why})})).json();
+  data.sellers.forEach(s=>{if(s.seller_name===x.seller_name&&(s.phone||"")===(x.phone||"")){s.status="Rejected";s.reason=r.reason;}});
+  drawResults();return true;
+}
 $("markAll").onclick=()=>{if(leads.new.length&&confirm(`Mark all ${leads.new.length} new leads as added to the queue?`))mark(leads.new.map(x=>x.key),"added");};
 
 // ---- search
@@ -1718,6 +1760,7 @@ function reasonGroup(x){
   if(/Not a US seller|Country not shown/.test(r))return "Not US / no US address";
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
   if(/Private label/.test(r))return "Private label";
+  if(/Rejected by you/.test(r))return "Rejected by you";
   return "Other";
 }
 // ---- spot check: 10 random sellers from the latest search, half accepted and half rejected
@@ -1736,16 +1779,21 @@ function spotCheck(){
     (picks.length?picks.map(x=>`<tr>
       <td style="width:230px">${x.status==="Good"?'<b style="color:var(--green);white-space:nowrap">✓ Accepted</b>':'<b style="color:var(--red);white-space:nowrap">✗ Rejected</b>'}
         ${x.status!=="Good"?`<div class="why" style="margin-top:4px">${esc(x.reason)}</div>`:""}</td>
-      <td>${sellerCell(x)}</td><td>${placeCell(x)}</td><td style="text-align:right">${storeBtn(x)}</td></tr>`).join("")
+      <td>${sellerCell(x)}</td><td>${placeCell(x)}</td><td style="text-align:right;white-space:nowrap">${storeBtn(x)}${x.status==="Good"?` <button class="small rej" data-spot="${picks.indexOf(x)}">Reject</button>`:""}</td></tr>`).join("")
       :`<tr><td colspan="4" class="empty">No checked sellers in this search yet.</td></tr>`)+`</tbody></table></div>`;
   $("spotMore").onclick=spotCheck;$("spotClose").onclick=()=>{$("spot").style.display="none";};
+  $("spot").querySelectorAll("button[data-spot]").forEach(b=>b.onclick=async()=>{
+    const x=picks[+b.dataset.spot];
+    if(await rejectSeller(x)){const td=b.closest("tr").firstElementChild;
+      td.innerHTML=`<b style="color:var(--red)">✗ Rejected by you</b>`;b.remove();loadLeads();}
+  });
   $("spot").scrollIntoView({behavior:"smooth",block:"start"});
 }
 $("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
   $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
-  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","Not checked yet","Other"];
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","Rejected by you","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
     `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
 }
@@ -1945,6 +1993,8 @@ class Handler(BaseHTTPRequestHandler):
                              args=(body["keywords"], pages, set(body.get("rules", [])), 2.0, bool(body.get("every_corner")),
                                    bool(body.get("hidden_sellers")))).start()
             self.send('{"ok":true}')
+        elif self.path == "/reject":
+            self.send(json.dumps({"reason": reject_seller(body.get("seller") or {}, (body.get("why") or "").strip()[:200])}))
         elif self.path == "/leads/mark":
             mark_leads(body.get("keys", []), "added" if body.get("status") == "added" else "new")
             self.send('{"ok":true}')
