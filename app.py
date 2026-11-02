@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 37
+VERSION = 38
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -415,6 +415,7 @@ def remove_lead(r, reason, source, key=None, phone=None):
         con.close()
     if phone:
         KNOWN.add(phone)
+    known_seller_ids().update(re.findall(r"/seller/(\d+)", str(r.get("seller_url") or "")))
 
 
 def reject_seller(r, why):
@@ -435,6 +436,7 @@ def reject_seller(r, why):
         con.close()
     if phone:
         KNOWN.add(phone)
+    known_seller_ids().update(re.findall(r"/seller/(\d+)", str(r.get("seller_url") or "")))
     # show it as rejected in this search's results too (and in its saved spreadsheet)
     with LOCK:
         for row_ in STATE["sellers"]:
@@ -2494,9 +2496,10 @@ def find_hidden_sellers(br, products, sellers, stats):
 NOT_LOADED = "Walmart page didn't load. Press Finish checking to try again."
 
 
-def load_seller(br, rec):
+def load_seller(br, rec, skip_seller=None, skip_number=None):
     """Open one seller's Walmart page and fill in their details and products.
-    Returns False if Walmart's page didn't load."""
+    Returns False if Walmart's page didn't load. skip_seller(store number) and skip_number(rec)
+    can stop early (rec["_skipped"] says why) so known sellers don't cost extra pages."""
     cid = rec["catalog_seller_id"]
     if not cid.isdigit():
         html = br.get(rec["sample_product_url"])
@@ -2506,6 +2509,9 @@ def load_seller(br, rec):
         rec["catalog_seller_id"] = cid
     if cid.isdigit():
         rec["seller_url"] = f"{BASE}/seller/{cid}"
+        if skip_seller and skip_seller(cid):
+            rec["_skipped"] = "seller"
+            return True
         html = br.get(rec["seller_url"])
         data = next_data(html) if html else None
         if not data:
@@ -2513,6 +2519,9 @@ def load_seller(br, rec):
         info = parse_seller_page(data, html)
         rec["products"].update(info.pop("store_products"))
         rec.update(info)
+        if skip_number and skip_number(rec):
+            rec["_skipped"] = "number"
+            return True
         if len(rec["products"]) < 10:
             # The seller page often shows only a few products. Their "Shop all" page lists the
             # rest, so the brand rules see what the store really sells.
@@ -2525,11 +2534,49 @@ def load_seller(br, rec):
     return True
 
 
+_SELLER_IDS = []
+
+
+def known_seller_ids():
+    """Walmart store numbers we already have, from the store links saved with numbers and leads."""
+    if not _SELLER_IDS:
+        ids = set()
+        con = db()
+        for (details,) in con.execute("SELECT details FROM numbers WHERE details LIKE '%/seller/%'"):
+            ids.update(re.findall(r"/seller/(\d+)", details))
+        con.close()
+        con = leads_db()
+        for (data,) in con.execute("SELECT data FROM leads"):
+            ids.update(re.findall(r"/seller/(\d+)", data))
+        con.close()
+        _SELLER_IDS.append(ids)
+    return _SELLER_IDS[0]
+
+
+def number_already_known(rec):
+    p = normalize_phone(rec.get("phone"))
+    if not p:
+        return False
+    other = RUN_PHONES.get(p)
+    return bool(other and other != rec["seller_name"]) or is_known(p)
+
+
 def check_seller(br, rec, active_rules):
     """Open one seller's page, fill in their details and apply the rules.
-    Returns False if Walmart's page didn't load (the seller stays unchecked)."""
-    if not load_seller(br, rec):
+    Returns False if Walmart's page didn't load (the seller stays unchecked).
+    With "Skip numbers we already have" on, sellers we already have are skipped as early as
+    possible: by their store number before opening anything, then by their phone number
+    before loading their full product list."""
+    skip_dupes = "no_duplicate_phone" in active_rules
+    if not load_seller(br, rec,
+                       skip_seller=(lambda cid: cid in known_seller_ids()) if skip_dupes else None,
+                       skip_number=number_already_known if skip_dupes else None):
         return False
+    skipped = rec.pop("_skipped", "")
+    if skipped:
+        rec["status"] = "Rejected"
+        rec["reason"] = "Already have this seller" if skipped == "seller" else "Already have this number"
+        return True
     reasons = [r["check"](rec) for r in RULES if r["id"] in active_rules]
     reasons = [r for r in reasons if r]
     rec["status"] = "Rejected" if reasons else "Good"
@@ -2541,6 +2588,9 @@ def check_seller(br, rec, active_rules):
         rec["status"], rec["reason"] = "Rejected", "Already have this number"
     if rec["status"] == "Good":
         add_lead(row(rec))
+    if rec["status"] == "Good" or blocking_reason(rec["reason"]):
+        if rec["catalog_seller_id"].isdigit():
+            known_seller_ids().add(rec["catalog_seller_id"])
     if rec["status"] == "Good" and phone:
         RUN_PHONES[phone] = rec["seller_name"]
     elif phone and not is_known(phone) and blocking_reason(rec["reason"]):
@@ -3131,7 +3181,7 @@ function reasonGroup(x){
   if(x.status==="Good")return "New leads";
   if(x.status==="Checking...")return "Not checked yet";
   const r=x.reason||"";
-  if(/Already have this number|Same phone as/.test(r))return "Already have";
+  if(/Already have this (number|seller)|Same phone as/.test(r))return "Already have";
   if(/Not a US seller|Country not shown/.test(r))return "Not US / no US address";
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
   if(/Private label/.test(r))return "Private label";
@@ -3144,7 +3194,7 @@ function reasonGroup(x){
 function pickRandom(list,n){const a=[...list];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a.slice(0,n);}
 function spotCheck(){
   const good=data.sellers.filter(x=>x.status==="Good");
-  const bad=data.sellers.filter(x=>x.status==="Rejected"&&!/Already have this number|Same phone as/.test(x.reason||""));
+  const bad=data.sellers.filter(x=>x.status==="Rejected"&&!/Already have this (number|seller)|Same phone as/.test(x.reason||""));
   let g=pickRandom(good,5),b=pickRandom(bad,5);
   if(g.length<5)b=pickRandom(bad,10-g.length);if(b.length<5)g=pickRandom(good,10-b.length);
   const picks=[...g,...b];
