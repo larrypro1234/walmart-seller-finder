@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 35
+VERSION = 36
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -125,6 +125,16 @@ DONT_BUY = [
     ("Shoes", _words(r"shoes?", r"sneakers?", r"boots?", r"sandals?", r"slippers?", r"heels", r"loafers?", r"cleats",
                      r"flip[- ]flops?", r"clogs?", r"footwear")),
     ("Costumes", _words(r"costumes?", r"wigs?", r"cosplay", r"halloween mask")),
+    ("Furniture", _words(r"sofas?", r"couch(es)?", r"loveseats?", r"sectionals?", r"desks?", r"tables?", r"chairs?",
+                         r"dressers?", r"chests? of drawers", r"bookshel(f|ves)", r"bookcases?", r"shel(f|ves)", r"shelving",
+                         r"cabinets?", r"cubb(y|ies)", r"wardrobes?", r"armoires?", r"sideboards?", r"credenzas?",
+                         r"kitchen (island|cart)s?", r"bar carts?", r"benches", r"bench", r"stools?", r"vanit(y|ies)",
+                         r"(toddler|bunk|loft|platform|floor|kids|twin|full|queen|king|murphy|canopy|storage|trundle|day) beds?",
+                         r"daybeds?", r"bed frames?", r"mattress(es)?", r"cribs?", r"changing tables?", r"nightstands?",
+                         r"ottomans?", r"recliners?", r"futons?", r"bar stools?", r"tv stands?", r"media consoles?",
+                         r"headboards?", r"(drying|clothes|garment|coat|shoe|wine) racks?", r"hall trees?", r"room dividers?",
+                         r"closet organizers?", r"(toy|dress up|kids) storage", r"storage (cabinet|organizer|unit|shelf)s?",
+                         r"furniture")),
     ("Clothing", re.compile(CLOTHING_WORDS.pattern + r"|\b(hats?|caps|beanies?|scarf|scarves|gloves|belts?|handbags?|purses?)\b", re.I)),
     ("Automotive", _words(r"car", r"cars", r"truck", r"tires?", r"brake", r"headlights?", r"tail ?lights?", r"bumper",
                           r"motor oil", r"spark plugs?", r"wiper blades?", r"auto parts?", r"automotive", r"vehicle",
@@ -137,11 +147,9 @@ DONT_BUY = [
     ("Bedding & Linens", _words(r"sheet sets?", r"bed sheets?", r"pillows?", r"pillowcases?", r"comforters?", r"duvet",
                                 r"blankets?", r"quilts?", r"mattress (topper|pad|protector)", r"bedspreads?", r"linens?",
                                 r"throws?", r"bath towels?", r"towel sets?", r"curtains?")),
-    ("Furniture", _words(r"sofas?", r"couch(es)?", r"desks?", r"tables?", r"chairs?", r"dressers?", r"bookshel(f|ves)",
-                         r"cabinets?", r"bed frames?", r"mattress(es)?", r"nightstands?", r"ottomans?", r"recliners?",
-                         r"futons?", r"bar stools?", r"tv stands?", r"headboards?", r"furniture")),
     ("Home décor", _words(r"wall art", r"canvas prints?", r"posters?", r"ornaments?", r"figurines?", r"artificial (flowers?|plants?)",
-                          r"wreaths?", r"vases?", r"d[eé]cor", r"wall decals?", r"picture frames?", r"tapestry")),
+                          r"wreaths?", r"vases?", r"d[eé]cor", r"wall decals?", r"picture frames?", r"tapestry",
+                          r"(wall|floor|full length) mirrors?")),
     ("Party supplies", _words(r"balloons?", r"party favors?", r"party supplies", r"party decorations?", r"banners?",
                               r"confetti", r"pi[nñ]atas?", r"cake toppers?", r"paper plates", r"party plates", r"streamers")),
     ("Medical equipment", _words(r"wheelchairs?", r"walkers?", r"rollators?", r"canes?", r"crutch(es)?", r"hospital beds?",
@@ -161,9 +169,17 @@ BUY_NAMES = {n for n, _ in BUY}
 DONT_BUY_NAMES = {n for n, _ in DONT_BUY}
 
 
+SURELY_FURNITURE = _words(r"vanity (desk|table|set|stool)s?", r"makeup vanit(y|ies)", r"(toddler|bunk|loft|kids) beds?",
+                          r"bed frames?", r"bookcases?", r"bookshel(f|ves)", r"wardrobes?", r"armoires?", r"dressers?",
+                          r"kitchen islands?", r"(coffee|console|dining|end) tables?", r"tv stands?", r"storage cabinets?",
+                          r"(drying|garment|clothes|shoe) racks?", r"(baby|convertible) cribs?", r"changing tables?")
+
+
 def classify(text):
     if USED.search(text or ""):
         return "Used/Refurbished"
+    if SURELY_FURNITURE.search(text or ""):
+        return "Furniture"
     for name, rx in BUY + DONT_BUY + NEUTRAL:
         if rx.search(text or ""):
             return name
@@ -786,6 +802,117 @@ def is_branded(product_text, seller_words):
     return not plain_word(first)
 
 
+# Well-known brands: a store must carry some of these to be a lead (when that rule is on).
+WELL_KNOWN_BRANDS = [
+    "a+d", "abreva", "act", "acure", "adidas", "advil", "afrin", "air wick",
+    "airborne", "ajax", "aleve", "align", "alka-seltzer", "all", "allegra", "almay",
+    "always", "amazonbasics", "american girl", "angel soft", "anker", "annie's", "apple", "aquafresh",
+    "aquaphor", "aquaphor baby", "arm & hammer", "aussie", "australian gold", "aveeno", "aveeno baby", "axe",
+    "azo", "baby einstein", "bakugan", "banana boat", "band-aid", "barbie", "barbie dreamhouse", "batman",
+    "bausch", "bayer", "beanie babies", "beano", "beats", "beech-nut", "belkin", "benadryl",
+    "benefiber", "bengay", "bic", "biofreeze", "biore", "black+decker", "bliss", "blistex",
+    "blue buffalo", "bluey", "bombas", "boost", "boppy", "bose", "boudreaux's", "bounce",
+    "bounty", "bratz", "brawny", "brio", "brita", "bufferin", "burt's bees", "campbell's",
+    "cantu", "cards against humanity", "carefree", "carhartt", "carmex", "cascade", "celestial seasonings", "centrum",
+    "cepacol", "cerave", "cetaphil", "champion", "chapstick", "charmin", "cheer", "cheetos",
+    "cheez-it", "chicco", "children's motrin", "chloraseptic", "claritin", "clean & clear", "clear eyes", "clif",
+    "clinique", "clorox", "clue", "coca-cola", "cocomelon", "colace", "cold-eeze", "colgate",
+    "connect 4", "contigo", "coppertone", "cortizone-10", "cosrx", "cottonelle", "covergirl", "crayola",
+    "crest", "cuisinart", "culturelle", "curad", "cutter", "d-con", "dawn", "dayquil",
+    "degree", "delsym", "depend", "dermalogica", "desitin", "dial", "dickies", "differin",
+    "disney", "dollar shave club", "doritos", "dove", "dove men", "downy", "dr. brown's", "dramamine",
+    "dulcolax", "dunkin", "duracell", "e.l.f.", "earth's best", "elmer's", "emergen-c", "energizer",
+    "enfamil", "ensure", "equate", "era", "essie", "estee lauder", "eucerin", "evenflo",
+    "excedrin", "exploding kittens", "expo", "febreze", "finish", "first aid beauty", "fisher-price", "five star",
+    "flonase", "florastor", "folgers", "freeman", "friskies", "frito-lay", "fruit of the loom", "funko",
+    "gain", "garden of life", "garnier", "garnier fructis", "gas-x", "gatorade", "ge", "general mills",
+    "gerber", "gi joe", "gildan", "gillette", "glad", "glade", "glide", "gold bond",
+    "goldfish", "graco", "greenies", "halls", "hamilton beach", "hanes", "happy baby", "haribo",
+    "harry's", "hasbro", "hatchimals", "hawaiian tropic", "head & shoulders", "hefty", "heinz", "herbal essences",
+    "hershey's", "hot wheels", "hot wheels monster trucks", "huggies", "hydro flask", "iams", "icy hot", "imodium",
+    "instant pot", "irish spring", "isopure", "jakks", "jbl", "jenga", "jergens", "jif",
+    "jockey", "john frieda", "johnson's", "joy", "jurassic world", "k'nex", "kellogg's", "keurig",
+    "kiehl's", "kind", "kirkland", "kit kat", "kleenex", "kotex", "kraft", "l'oreal",
+    "l.o.l. surprise", "la roche-posay", "lactaid", "lamisil", "lancome", "lay's", "leapfrog", "lego",
+    "lever 2000", "libman", "lincoln logs", "lipton", "liquid i.v.", "listerine", "little remedies", "little tikes",
+    "logitech", "lotrimin", "lubriderm", "luvs", "lysol", "m&m's", "magna-tiles", "mam",
+    "mario badescu", "marvel legends", "matchbox", "mattel", "maxwell house", "maybelline", "mead", "mega bloks",
+    "melissa & doug", "melissa and doug", "metamucil", "method", "mga", "milani", "milk-bone", "minecraft",
+    "miralax", "monistat", "monopoly", "monster", "mophie", "motrin", "move free", "mr. clean",
+    "mrs. meyer's", "mucinex", "munchkin", "muscletech", "my little pony", "mykind", "nabisco", "nasacort",
+    "native", "natrol", "nature made", "nature valley", "nature's bounty", "nature's truth", "nature's way", "neosporin",
+    "nerf", "nerf rival", "neutrogena", "new chapter", "nexcare", "nexium", "nexxus", "nike",
+    "ninja", "nivea", "nordic naturals", "now foods", "noxzema", "nuby", "nuk", "nutella",
+    "nyquil", "nyx", "o-cedar", "ocean", "off!", "ogx", "olay", "old spice",
+    "olly", "one a day", "opcon", "operation", "opi", "optimum nutrition", "oral-b", "oreo",
+    "orgain", "osteo bi-flex", "otterbox", "oxiclean", "oxo", "palmolive", "pampers", "pantene",
+    "paper mate", "paula's choice", "paw patrol", "pedialyte", "pedigree", "pepcid", "peppa pig", "pepsi",
+    "pepto-bismol", "persil", "philips", "philips avent", "physicians formula", "pine-sol", "plackers", "planters",
+    "play-doh", "playmobil", "playtex", "playtex baby", "poise", "pokemon", "polly pocket", "polysporin",
+    "pond's", "pop-tarts", "post-it", "power rangers", "premier protein", "preparation h", "prevail", "prilosec",
+    "pringles", "progresso", "puffs", "puma", "purex", "purina", "pyrex", "q-tips",
+    "quaker", "quilted northern", "qunol", "radio flyer", "raid", "rainbow high", "rainbow light", "ravensburger",
+    "razor", "red bull", "redken", "reese's", "refresh", "renuzit", "resolve", "revlon",
+    "reynolds", "ricola", "rimmel", "ritz", "robitussin", "roblox", "rolaids", "rubbermaid",
+    "sally hansen", "salonpas", "samsung", "sandisk", "saran", "schick", "scope", "scotch",
+    "scotch-brite", "scott", "scrabble", "scrubbing bubbles", "secret", "sensodyne", "sesame street", "seventh generation",
+    "seventh generation baby", "sharpie", "shea moisture", "shout", "similac", "simple", "simply saline", "skippy",
+    "skittles", "skullcandy", "smucker's", "snickers", "snuggle", "solgar", "sony", "spider-man",
+    "spigen", "spin master", "spring valley", "squishmallows", "st. ives", "stanley", "star wars", "starbucks",
+    "starburst", "stayfree", "step2", "sterilite", "suave", "sudafed", "summer's eve", "sun bum",
+    "sundown", "supergoop", "swiffer", "systane", "tampax", "tena", "thayers", "the first years",
+    "the ordinary", "theraflu", "thermacare", "thermos", "thomas & friends", "tide", "tiger balm", "tinactin",
+    "tom's of maine", "tommee tippee", "tonka", "transformers", "tresemme", "tums", "twister", "ty",
+    "tylenol", "u by kotex", "under armour", "unisom", "uno", "vagisil", "vaseline", "venus",
+    "vicks", "visine", "vitafusion", "vital proteins", "viva", "vtech", "waterpik", "welch's",
+    "wet n wild", "windex", "xyzal", "yes to", "yeti", "zantac", "zarbee's", "zicam",
+    "ziploc", "zojirushi", "zuru", "zyrtec", "zzzquil",
+]
+PACK_WORDS = {"pack", "packs", "of", "set", "bundle", "count", "ct", "x", "pk", "lot", "case", "box", "value", "bulk"}
+
+
+_BRAND_INDEX = []
+
+
+def known_brand_index():
+    if not _BRAND_INDEX:
+        _BRAND_INDEX.append(build_brand_index())
+    return _BRAND_INDEX[0]
+
+
+def build_brand_index():
+    """Brand names split into ones that can match anywhere in a product name, and ones that are plain
+    English words ("tide", "all") that only count at the start of the name."""
+    names = {norm(b) for b in WELL_KNOWN_BRANDS} | full_brand_names() | {norm(b) for b in WORD_BRANDS}
+    names = {n for n in names if n}
+    start_only = {n for n in names if " " not in n and (len(n) <= 3 or plain_word(n))}
+    return names - start_only, start_only
+
+
+def names_known_brand(product_text):
+    m = re.search(r"\| brand: (.+)$", product_text or "")
+    anywhere, start_only = known_brand_index()
+    if m and norm(m.group(1)) in anywhere | start_only:
+        return True
+    words = norm(re.sub(r"\| brand: .+$", "", product_text or "")).split()
+    while words and (words[0].isdigit() or words[0] in PACK_WORDS):
+        words = words[1:]  # "2 pack tide pods" -> "tide pods"
+    title = " ".join(words)
+    padded = f" {title} "
+    return (any(f" {b} " in padded for b in anywhere)
+            or any(title == b or title.startswith(b + " ") for b in start_only))
+
+
+def rule_known_brands(s):
+    texts = list(s.get("products", {}).values())
+    if len(texts) < 3:
+        return None  # too few products to judge
+    known = sum(1 for t in texts if names_known_brand(t))
+    if known >= 3 or known / len(texts) >= 0.5:
+        return None
+    return f"Few well-known brands ({known} of {len(texts)} products)"
+
+
 def rule_no_name_products(s):
     texts = list(s.get("products", {}).values())
     if len(texts) < 5 or not english_words():
@@ -802,6 +929,7 @@ RULES = [
     {"id": "store_categories", "label": "Only stores that sell what we buy", "check": rule_store_categories},
     {"id": "no_private_label", "label": "No private-label stores (own brand only)", "check": rule_private_label},
     {"id": "no_no_name", "label": "No stores selling mostly no-name products", "check": rule_no_name_products},
+    {"id": "known_brands", "label": "Only stores that carry well-known brands", "check": rule_known_brands},
     {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
@@ -1962,6 +2090,7 @@ function reasonGroup(x){
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
   if(/Private label/.test(r))return "Private label";
   if(/no-name products/.test(r))return "No-name products";
+  if(/Few well-known brands/.test(r))return "Few well-known brands";
   if(/Rejected by you/.test(r))return "Rejected by you";
   return "Other";
 }
@@ -1995,7 +2124,7 @@ $("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
   $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
-  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","Rejected by you","Not checked yet","Other"];
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","Few well-known brands","Rejected by you","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
     `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
 }
