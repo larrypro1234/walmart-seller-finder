@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 36
+VERSION = 37
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -1943,11 +1943,11 @@ def names_known_brand(product_text):
 
 def rule_known_brands(s):
     texts = list(s.get("products", {}).values())
-    if len(texts) < 3:
-        return None  # too few products to judge
+    if not texts:
+        return None  # no products seen at all
     if any(names_known_brand(t) for t in texts):
         return None  # carries at least one of our brands
-    return f"None of our brands ({len(texts)} products checked)"
+    return f"None of our brands ({len(texts)} product{'' if len(texts) == 1 else 's'} checked)"
 
 
 def rule_no_name_products(s):
@@ -2513,6 +2513,14 @@ def load_seller(br, rec):
         info = parse_seller_page(data, html)
         rec["products"].update(info.pop("store_products"))
         rec.update(info)
+        if len(rec["products"]) < 10:
+            # The seller page often shows only a few products. Their "Shop all" page lists the
+            # rest, so the brand rules see what the store really sells.
+            html = br.get(f"{BASE}/seller/{cid}/cp/shopall")
+            data = next_data(html) if html else None
+            if data:
+                rec["products"].update({str(d["usItemId"]): item_text(d)
+                                        for d in walk(data) if d.get("usItemId") and d.get("name")})
     rec["store_mix"] = describe_mix(store_mix(rec))
     return True
 
@@ -2562,7 +2570,8 @@ def run_recheck(active_rules, delay):
     for r in waiting:
         rec = dict(r)
         rec["keywords"] = {k.strip() for k in str(r.get("keywords") or "").split(";") if k.strip()}
-        rec["products"] = {}
+        found = re.split(r" search: | more sellers on: ", str(r.get("found_from") or ""), maxsplit=1)
+        rec["products"] = {"found": found[1]} if len(found) == 2 and found[1] else {}
         rec["sample_product_url"] = r.get("found_from_url") or r.get("seller_url") or ""
         rec["catalog_seller_id"] = str(r.get("catalog_seller_id") or "")
         rec["status"], rec["reason"] = "Checking...", ""
