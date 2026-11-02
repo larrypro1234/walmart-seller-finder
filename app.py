@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import unicodedata
 import shutil
 import sqlite3
 import subprocess
@@ -706,7 +707,10 @@ GENERIC_WORDS = set("""toy toys kid kids baby babies home beauty health pet pets
 
 
 def norm(text):
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
+    text = (text or "").replace("\u2019", "'").replace("\u2018", "'")  # Hyland’s -> Hyland's
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()  # L'Oréal -> L'Oreal
+    text = text.lower().replace("'", "")  # O'Keeffe's = Okeeffes, Burt's = Burts
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
 
 
 def seller_core(name):
@@ -802,7 +806,1023 @@ def is_branded(product_text, seller_words):
     return not plain_word(first)
 
 
-# Well-known brands: a store must carry some of these to be a lead (when that rule is on).
+# Our brands (from Larry): one per line, as given. Words after the brand name like
+# "coffee" or "deodorant" are fine: the app also matches the name without them.
+YOUR_BRANDS = """
+303 Products
+3M Mask
+5-hour Energy
+AbilityOne
+Acnefree
+ADAMS
+Advil
+Airborne
+Alaffia
+Alba Botanica
+Aleve
+Algenist
+Alka-Seltzer
+ALLMAX Nutrition
+Almay
+Alteril
+Altoids
+American Crew
+amiibo
+Amope
+Andalou
+Andis
+Aquaphor
+Aqueon
+Arches & Halos
+Arm & Hammer
+Asmodee
+Aspercreme
+At-a-Glance
+Audio-Technica
+Aveeno
+Avia socks
+AVON
+Axe and Sledge
+AXIS-Y
+Babyganics
+Balmex
+Band-Aid
+Bandai hobby
+Barbasol
+Barbie
+Barney
+basis
+Bath and Body Works
+Batiste
+Bayer
+Benadryl
+Benefiber
+Berkley
+Berkley jensen
+Betco
+BIC Pens
+Biofreeze
+BioGuard
+Biore
+Biotene
+Bissell
+Black Diamond
+Black Radiance
+Blistex
+Blue Devil
+Blue Lizard
+Bluebonnet Nutrition
+BodyArmor IV
+BodyTech
+Boiron
+Botanics Organic
+Boudreauxs
+Bratz
+Braun
+Brio World
+Brita pitcher
+brother printer
+Brut
+BSN
+Bucked Up
+Buffalo Games
+Bulldog mens
+Burt's Bees
+Cafe Bustelo coffee
+Calico Critters
+Caltrate
+CamelBak
+Canon Printer
+Cantu
+Carbona
+Caribou Coffee
+Carlson Vitamin
+Carmex
+Casabella
+Cascade Platinum
+Case Pack
+casio watch
+CELSIUS On The Go
+Centrum
+Ceramedx
+CeraVe
+Cetaphil
+Champion Socks
+Channellock
+Chapstick
+Chefman
+Chore Boy
+Cif
+Cirkul
+Citrucel
+Claritin
+Clean & Clear
+Clearblue test
+Clif Bar
+CLIF BLOKS
+Clif Builders
+Clorox
+Coffeemate
+Colgate
+Coloplast
+Combat Max
+Comfort Zone
+Conair
+Copper Fit
+Coralife
+Cortizone
+COSRX
+Covergirl
+cramer
+Crayola
+Creative Kids
+Cremo
+CRESCENT Tool
+Crest Teeth
+Cuccio
+Curad
+Curt
+CVS
+d-CON
+Dallmayr coffee
+Dawn
+Degree deodorant
+Delsym
+DenTek
+Dentemp
+Depend
+Derma B
+Derma E
+Dermasil
+Desert Essence
+Design Essentials
+DeWalt
+Diablo Blade
+Difeel
+Differin
+Digestive Advantage
+Dirt Devil
+Disney Princess
+Dixon markers
+Doctor Squish
+doTERRA
+Dove
+Downy
+Dr Bronner
+Dr Scholl's
+Dr. Beckmann
+Dr. Dan's
+Dr. Squatch
+Dr. Teal's
+Dragon Ball
+Dreamworks
+dreo heater
+Dunkin coffee
+Duracell
+Duraflame
+DYMO
+E45
+E6000
+Earth Breeze laundry
+Earth Mama
+Earth Therapeutics
+Ecover
+Eight O'Clock coffee
+elf
+Emergen-C
+Eminence
+Encanto
+Energizer Batteries
+Eos
+Essie
+Estwing
+Eternabond
+Eucerin
+Everlast
+EVERPRO
+Excedrin
+Exploding Kittens
+Expo Dry Erase
+Farberware
+Febreze
+Fellowes
+FENTY BEAUTY
+Fingerlings
+Finish Quantum
+Finishing Touch Flawless
+First Alert
+Fisher-Price
+Fit-rx
+Fixodent
+flamingo
+Flex Paste
+Flex Tape
+Flintstones
+Flonase
+Florajen
+Florastor
+fluidmaster
+Folgers coffee
+Force Factor
+Fox Racing
+Franklin Sports
+Freeman
+Fruit of the Loom
+Funko
+Furby
+G.I. Joe
+Gain detergent
+Galison
+Game Face
+Gamewright
+Garden of Life
+Garnier
+Gas-X
+GAT Sport
+Gen See
+Genepro
+Germ-X
+Gevalia coffee
+Ghost supplements
+Gildan Pack
+Gillette
+Glad
+Glade PlugIns
+Glymed
+GNC
+Gojo Sanitizer
+Gold Bond
+Goli
+Goo Gone
+Gorilla glue
+Got2B
+Green Mountain coffee
+Guardsman
+HALLS
+Hamilton Beach
+Hanes
+Harney and Sons
+Harrys
+Hasbro
+HASK
+Hawaiian Tropic
+Heal & Rescue
+Hefty
+Hello
+Hempz
+HEX BOTS
+Hills Bros.
+Hiya Toys
+Homax
+Honeywell fan
+Hot Tools
+Hot Wheels
+Hothands
+Howard Leight
+Howard Products
+Husky (tools)
+Hyland’s
+HyperX
+Icy Hot
+IIT
+Ingenuity Baby
+Irish Spring
+Irwin Naturals
+iSatori
+Isopure
+Italia Deluxe
+Its a 10
+IZOD
+J.R. Watkins
+Jason
+Jason Coconut
+Jellycat
+Jockey
+John Frieda
+Jovan musk
+Kendra Scott
+Kervan gummy
+Keurig
+Kirkland
+Kiss salon
+Kiwi
+Klein tools
+Kopari
+KOS
+Krud Kutter
+KVD
+Kwikset
+L'Oréal
+LA Colors
+La Roche-Posay
+Lactaid
+Lady Speed Stick
+Larabar
+Lavazza
+Lego
+Libman
+Liftmaster
+Lil Critters
+Limbsaver
+Little Live Pets
+Little Tikes
+Logitech
+Lotrimin
+Lumax
+Luna Bar
+Lysol
+Mac Makeup
+Magnetoe jurassic
+Magpul
+Mally beauty
+Martha Stewart
+MaryRuth's
+Master Lock
+Masters of the Universe
+Maui Moisture
+Maybelline
+Mckesson hand sanitizer
+MECHANIX WEAR
+MEGA BLOKS
+MegaFood
+Meguiar’s
+MERIT
+Metamucil
+Method
+MGA’s Miniverse
+Micro-Scientific
+Microban
+Mielle
+milani
+Milk Bone
+Milwaukee
+Minwax
+Mitchum deodorant
+Moen
+Moira Beauty
+Molotow
+Monster High
+Motortrend
+Mr. Coffee
+Mr. Heater
+Mrs. Meyer's
+Mucinex
+Muscle Milk
+MuscleTech
+My Arcade
+Nair
+Nakd Bars
+Native
+Natrol
+Nature's Bounty
+Nature’s Truth
+Nature's Way
+Natureplex
+NeilMed
+Nerf
+Neuriva
+New Chapter
+Nexium
+NGK
+Nickelodeon
+Nicorette Gum
+Nordic Naturals
+NOW Foods
+Nu Finish
+NYX
+o.b.
+O’keeffes
+O2COOL
+Officemate
+Olay
+Olly
+One A Day
+Ontel
+Optase
+Optimum Nutrition
+Oral-B
+Orly Nail
+Osteo
+OXO Good Grips
+Ozium
+Palmer's
+Paper Mate
+Parker & Bailey
+Parodontax
+Paw Patrol
+Peppa Pig
+Peptiva
+Permatex
+pH-D Feminine
+Physicians Formula
+PlayMonster
+Poise
+Polident
+Poligrip
+Power Rangers
+Power Stick deodorant
+PowerA
+Preparation H
+Pressman
+Prevacid
+Procell
+ProClearz
+PROcure
+Pronamel
+PROVON
+PUR gum
+Purell
+Quartet
+QUIXX scratch
+Qunol
+Radians
+Raid
+Rain-X
+Rare Beauty
+Ravensburger
+Raw Elements
+Raw Nutrition
+Real Techniques
+Redcon1
+REF shampoo
+RELAXIUM
+Remington
+Renew Life
+RepHresh
+replenza
+Restoration Games
+Revlon
+Revolution Beauty
+Rid-X
+Ridgid
+Right Guard
+Rimmel
+Rite Aid
+RITUALS Sakura
+Robitussin
+Rolda
+Rubbermaid
+Ryse
+Sally Hansen
+SanDisk
+Schlage
+Schmidt's
+Schwarzkopf
+Scinic
+Scrubbing Bubbles
+Scunci
+Secret deodorant
+Sensodyne
+Seventh Generation
+Sharpie
+SheaMoisture
+Siemens
+Skil
+Skin1004
+Sky and Sol
+Slim Jim jerky
+SmartyPants
+Snark guitar tuners
+Solgar
+Spenco
+Spring Valley
+Square D Schneider
+Squish-a-longs
+Sqwincher
+Stanley Utility Knife
+Star Wars
+Stem Insect
+Streamlight Flashlight
+Summer's Eve
+Sylvania
+Systane
+Thayers
+The Original Donut Shop
+Theraflu
+Thermacell
+Think Fun
+Thinkkids
+TIGI
+TimeMist
+TITEBOND
+Titleist Golf
+Tonies
+Transformers
+Tree Hut
+Treva
+TropiClean
+Truvia
+TUMS
+Turtle Beach
+Turtle Wax
+U by Kotex
+Under Armour
+Under armour socks
+Unicorn Academy
+University Games
+Vagisil
+Vanicream
+VELCRO Brand
+Vera Wang perfume
+Versachem
+Vicks
+Victoria's Secret perfume
+Victorinox
+Vitafusion
+Vital Proteins
+Viviscal
+Voltaren
+VTech
+Wahl
+Warner Bros
+Westcott
+Western Digital
+Wet ones
+Wilkinson Sword
+Yale
+Yankee Candle
+Zebra pen
+ZEISS
+Zicam
+zuru
+Tylenol
+Motrin
+Zyrtec
+Allegra
+Xyzal
+Sudafed
+Mylanta
+Maalox
+Pepcid
+Prilosec OTC
+Tagamet HB
+Imodium
+Dulcolax
+MiraLAX
+Senokot
+Colace
+Kaopectate
+Pepto-Bismol
+Dramamine
+Bonine
+Unisom
+ZzzQuil
+NyQuil
+DayQuil
+Coricidin HBP
+Afrin
+Nasacort
+Rhinocort
+Astepro
+Pataday
+Zaditor
+Visine
+Clear Eyes
+Refresh
+Blink Tears
+TheraTears
+Rohto
+Opti-Free
+Biotrue
+Renu
+Bausch + Lomb
+Similasan
+Polysporin
+Neosporin
+Hibiclens
+Betadine
+Bactine
+Solarcaine
+Orajel
+Abreva
+Nature Made
+Life Extension
+Thorne
+Pure Encapsulations
+Jarrow Formulas
+Doctor's Best
+Sports Research
+Solaray
+Swanson
+21st Century Vitamins
+Country Life
+Rainbow Light
+Healthy Origins
+Nutricost
+BulkSupplements
+Horbäach
+Bronson
+Carlyle
+Puritan's Pride
+HUM Nutrition
+Ritual
+Seed
+Culturelle
+Align
+BioGaia
+AZO
+Metagenics
+Ortho Molecular Products
+Gaia Herbs
+Herb Pharm
+Traditional Medicinals
+Yogi Tea
+Zipfizz
+Liquid I.V.
+Pedialyte
+DripDrop
+Nuun
+Ultima Replenisher
+LMNT
+Propel
+Gatorade
+Powerade
+Ensure
+Boost
+Premier Protein
+Orgain
+Dymatize
+Cellucor
+Rule One Proteins
+MusclePharm
+Neutrogena
+Vaseline
+Nivea
+Lubriderm
+Jergens
+Suave
+St. Ives
+Pond's
+Simple Skincare
+Banana Boat
+Coppertone
+Sun Bum
+Supergoop!
+EltaMD
+Curél
+AmLactin
+Bioderma
+Embryolisse
+First Aid Beauty
+Paula's Choice
+The Ordinary
+The INKEY List
+Drunk Elephant
+Glow Recipe
+Sunday Riley
+Tatcha
+Youth To The People
+Farmacy
+Laneige
+Innisfree
+belif
+Beauty of Joseon
+Good Molecules
+Byoma
+Versed
+Bubble Skincare
+Cocokind
+Hero Cosmetics
+PanOxyl
+Kate Somerville
+Kiehl's
+Clinique
+Estée Lauder
+Dermalogica
+Murad
+Peter Thomas Roth
+Philosophy
+Fresh
+Origins
+Mario Badescu
+Wet n Wild
+Anastasia Beverly Hills
+Tarte
+Too Faced
+Urban Decay
+Benefit Cosmetics
+NARS
+IT Cosmetics
+bareMinerals
+Bobbi Brown
+Laura Mercier
+Charlotte Tilbury
+Huda Beauty
+Pat McGrath Labs
+ColourPop
+Morphe
+Juvia's Place
+essence cosmetics
+Catrice
+Old Spice
+Inglot
+Palladio Beauty
+No7
+Pixi Beauty
+IMAN Cosmetics
+Black Opal
+Ardell
+DUO Lash Adhesive
+Lilly Lashes
+Velour Lashes
+Redken
+Matrix
+Biolage
+Paul Mitchell
+Joico
+CHI Haircare
+Kenra Professional
+OGX
+Pantene
+TRESemmé
+Head & Shoulders
+Aussie
+Herbal Essences
+Nioxin
+Moroccanoil
+Olaplex
+K18 Hair
+Living Proof
+Pureology
+Not Your Mother's
+Tide
+Swiffer
+Mr. Clean
+Bounty
+Charmin
+Kleenex
+Puffs
+Scott
+Cottonelle
+Viva
+Windex
+Pine-Sol
+Fabuloso
+Ajax
+Comet
+Bar Keepers Friend
+Soft Scrub
+OxiClean
+Shout
+Spray 'n Wash
+Zout
+Woolite
+Persil
+all Laundry
+Bounce
+Snuggle
+Purex
+Dreft
+Foca
+Zote
+OdoBan
+Simple Green
+Zep
+CLR
+Kaboom
+Easy-Off
+Weiman
+Pledge
+Endust
+Murphy Oil Soap
+Ziploc
+Reynolds Wrap
+Saran Wrap
+Scotch-Brite
+Brillo
+S.O.S. Pads
+Scrub Daddy
+Lestoil
+ECOS
+The Pink Stuff
+Huggies
+Pampers
+Luvs
+Pull-Ups
+Goodnites
+WaterWipes
+The Honest Company
+Hello Bello
+Mustela
+Tubby Todd
+Pipette
+Johnson's Baby
+Desitin
+A+D
+Triple Paste
+Boogie Wipes
+Frida Baby
+Dr. Brown's
+Philips Avent
+NUK
+MAM Baby
+Tommee Tippee
+Evenflo
+Munchkin
+Skip Hop
+Graco
+Chicco
+Safety 1st
+The First Years
+Comotomo
+Lansinoh
+Medela
+Haakaa
+Elvie
+Boppy
+Summer Infant
+Baby Brezza
+Ubbi
+Playtex Baby
+Listerine
+ACT Mouthwash
+TheraBreath
+Tom's of Maine
+Close-Up
+Aim Toothpaste
+Aquafresh
+GUM Oral Care
+Plackers
+REACH Dental
+Dr. Tung's
+Pokémon
+Squishmallows
+Bluey
+Melissa & Doug
+Play-Doh
+MAGNA-TILES
+PicassoTiles
+K'NEX
+Lincoln Logs
+Tinkertoy
+Lite-Brite
+Etch A Sketch
+Spirograph
+Perler
+Rainbow Loom
+L.O.L. Surprise!
+Baby Alive
+My Little Pony
+Care Bears
+Cabbage Patch Kids
+American Girl
+Polly Pocket
+Littlest Pet Shop
+Schleich
+Safari Ltd.
+Papo
+Beyblade
+Bakugan
+Magic: The Gathering
+Yu-Gi-Oh!
+Dungeons & Dragons
+Warhammer
+Hatchimals
+Pillow Pets
+Bop It!
+Simon
+Connect 4
+Jenga
+Monopoly
+Clue
+Operation
+Sorry!
+Guess Who?
+UNO
+Skip-Bo
+Phase 10
+Apples to Apples
+Cards Against Humanity
+Sequence
+Coca-Cola
+Pepsi
+Sprite
+Fanta
+Dr Pepper
+7UP
+Canada Dry
+Schweppes
+A&W Root Beer
+Mountain Dew
+Ocean Spray
+Welch's
+Mott's
+Hawaiian Punch
+Capri Sun
+Kool-Aid
+Crystal Light
+Tang
+Country Time
+Minute Maid
+Simply
+Tropicana
+Florida's Natural
+Naked Juice
+V8
+Campbell's
+Progresso
+Hormel
+SPAM
+Chef Boyardee
+Ragu
+Prego
+Barilla
+Rao's
+Bertolli
+Hunt's
+Heinz
+French's
+Hellmann's
+Duke's Mayonnaise
+Hidden Valley
+Kraft
+Velveeta
+Philadelphia Cream Cheese
+Jif
+Skippy
+Smucker's
+Nutella
+Hershey's
+Reese's
+Apple
+Samsung
+Sony
+Microsoft
+Dell
+HP
+Lenovo
+ASUS
+Acer
+Anker
+Belkin
+JBL
+Bose
+Beats
+Skullcandy
+JLab
+Sennheiser
+Razer
+SteelSeries
+Corsair
+Elgato
+Nintendo
+PlayStation
+Xbox
+Seagate
+Kingston
+Lexar
+TP-Link
+NETGEAR
+Linksys
+Epson
+Zojirushi
+Ninja
+Cuisinart
+KitchenAid
+Oster
+Black+Decker
+Breville
+Vitamix
+NutriBullet
+Instant Pot
+Crock-Pot
+Thermos
+Contigo
+Hydro Flask
+YETI
+Pyrex
+Corelle
+Lodge
+T-fal
+Calphalon
+Purina
+Pedigree
+Blue Buffalo
+IAMS
+Royal Canin
+Hill's Science Diet
+Temptations
+Greenies
+KONG
+Nylabone
+PetSafe
+Armor All
+WD-40
+Lucas Oil
+"""
+NOT_BRANDS = {"case pack"}
+# Our brands that are also everyday words at the start of product names ("Fresh Cut Flowers",
+# "Simply Delicious..."): they only count when Walmart lists them as the product's brand.
+EVERYDAY_WORD_BRANDS = {"fresh", "simply", "hello", "seed", "origins", "sequence", "matrix", "sorry", "clue",
+                        "operation", "ritual", "philosophy", "refresh", "boost", "propel", "align"}
+DESCRIPTOR_WORDS = set("""coffee pitcher printer watch deodorant batteries detergent pack fan tools tool utility knife
+    flashlight golf socks perfume pen pens heater laundry test teeth dry erase hand sanitizer gum vitamin vitamins
+    blade mens musk salon nail hobby jerky insect makeup scratch shampoo mouthwash toothpaste oral care skincare
+    cosmetics professional haircare lash adhesive beauty proteins products mayonnaise cream cheese root beer wrap
+    pads otc hb hbp markers glue supplements nutrition baby on the go platinum quantum plugins bar bars brand
+    feminine guitar tuners hair dental""".split())
+
+# Well-known brands (Claude's list, kept alongside ours).
 WELL_KNOWN_BRANDS = [
     "a+d", "abreva", "act", "acure", "adidas", "advil", "afrin", "air wick",
     "airborne", "ajax", "aleve", "align", "alka-seltzer", "all", "allegra", "almay",
@@ -880,37 +1900,54 @@ def known_brand_index():
     return _BRAND_INDEX[0]
 
 
+def our_brand_names():
+    names = set()
+    for line in YOUR_BRANDS.splitlines():
+        name = norm(re.sub(r"\(.*?\)", "", line))  # "Husky (tools)" -> "husky"
+        if not name or name in NOT_BRANDS:
+            continue
+        names.add(name)
+        words = name.split()
+        while len(words) > 1 and words[-1] in DESCRIPTOR_WORDS:
+            words = words[:-1]  # "folgers coffee" -> "folgers"
+        core = " ".join(words)
+        if core != name and (" " in core or (len(core) >= 4 and not plain_word(core))):
+            names.add(core)  # only if what's left is still clearly a brand ("gain" alone is not)
+    return names
+
+
 def build_brand_index():
     """Brand names split into ones that can match anywhere in a product name, and ones that are plain
-    English words ("tide", "all") that only count at the start of the name."""
-    names = {norm(b) for b in WELL_KNOWN_BRANDS} | full_brand_names() | {norm(b) for b in WORD_BRANDS}
-    names = {n for n in names if n}
-    start_only = {n for n in names if " " not in n and (len(n) <= 3 or plain_word(n))}
-    return names - start_only, start_only
+    English words ("tide", "all") or very short ("hp") that only count at the start of the name."""
+    names = our_brand_names() | {norm(b) for b in WELL_KNOWN_BRANDS} | full_brand_names() | {norm(b) for b in WORD_BRANDS}
+    names = {n for n in names if n and not n.isdigit()}
+    start_only = {n for n in names if " " not in n and (len(n) <= 3 or plain_word(n))} - EVERYDAY_WORD_BRANDS
+    return names - start_only - EVERYDAY_WORD_BRANDS, start_only, max(len(n.split()) for n in names)
 
 
 def names_known_brand(product_text):
     m = re.search(r"\| brand: (.+)$", product_text or "")
-    anywhere, start_only = known_brand_index()
-    if m and norm(m.group(1)) in anywhere | start_only:
+    anywhere, start_only, longest = known_brand_index()
+    if m and norm(m.group(1)) in anywhere | start_only | EVERYDAY_WORD_BRANDS:
         return True
     words = norm(re.sub(r"\| brand: .+$", "", product_text or "")).split()
     while words and (words[0].isdigit() or words[0] in PACK_WORDS):
         words = words[1:]  # "2 pack tide pods" -> "tide pods"
-    title = " ".join(words)
-    padded = f" {title} "
-    return (any(f" {b} " in padded for b in anywhere)
-            or any(title == b or title.startswith(b + " ") for b in start_only))
+    for n in range(1, longest + 1):
+        if " ".join(words[:n]) in start_only:
+            return True
+        if any(" ".join(words[i:i + n]) in anywhere for i in range(len(words) - n + 1)):
+            return True
+    return False
 
 
 def rule_known_brands(s):
     texts = list(s.get("products", {}).values())
     if len(texts) < 3:
         return None  # too few products to judge
-    known = sum(1 for t in texts if names_known_brand(t))
-    if known >= 3 or known / len(texts) >= 0.5:
-        return None
-    return f"Few well-known brands ({known} of {len(texts)} products)"
+    if any(names_known_brand(t) for t in texts):
+        return None  # carries at least one of our brands
+    return f"None of our brands ({len(texts)} products checked)"
 
 
 def rule_no_name_products(s):
@@ -929,7 +1966,7 @@ RULES = [
     {"id": "store_categories", "label": "Only stores that sell what we buy", "check": rule_store_categories},
     {"id": "no_private_label", "label": "No private-label stores (own brand only)", "check": rule_private_label},
     {"id": "no_no_name", "label": "No stores selling mostly no-name products", "check": rule_no_name_products},
-    {"id": "known_brands", "label": "Only stores that carry well-known brands", "check": rule_known_brands},
+    {"id": "known_brands", "label": "Only stores that carry at least 1 of our brands", "check": rule_known_brands},
     {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
@@ -2090,7 +3127,7 @@ function reasonGroup(x){
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
   if(/Private label/.test(r))return "Private label";
   if(/no-name products/.test(r))return "No-name products";
-  if(/Few well-known brands/.test(r))return "Few well-known brands";
+  if(/None of our brands/.test(r))return "None of our brands";
   if(/Rejected by you/.test(r))return "Rejected by you";
   return "Other";
 }
@@ -2124,7 +3161,7 @@ $("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
   $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
-  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","Few well-known brands","Rejected by you","Not checked yet","Other"];
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","None of our brands","Rejected by you","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
     `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
 }
