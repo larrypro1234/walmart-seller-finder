@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 28
+VERSION = 29
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -1542,6 +1542,9 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
   <p class="sub" id="lastInfo">Good sellers from here are also added to Leads automatically.</p>
   <div id="summary" class="answer" style="display:none;background:var(--blue-soft);color:var(--text);font-weight:500;margin:0 0 14px"></div>
   <div id="breakdown" class="chips" style="margin:0 0 14px"></div>
+  <div id="spotBar" style="display:none;margin:0 0 14px"><button id="spotBtn" class="primary small">Spot check 10</button>
+    <span class="muted" style="margin-left:8px">Shows 10 random sellers from this search (5 accepted, 5 rejected) so you can check the app's choices.</span></div>
+  <div id="spot" style="display:none" class="card"></div>
   <div class="pills">
     <button class="pill on" data-r="Good">Good <span id="nGood">0</span></button>
     <button class="pill" data-r="Rejected">Rejected <span id="nRejected">0</span></button>
@@ -1667,7 +1670,30 @@ function reasonGroup(x){
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
   return "Other";
 }
+// ---- spot check: 10 random sellers from the latest search, half accepted and half rejected
+function pickRandom(list,n){const a=[...list];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a.slice(0,n);}
+function spotCheck(){
+  const good=data.sellers.filter(x=>x.status==="Good");
+  const bad=data.sellers.filter(x=>x.status==="Rejected"&&!/Already have this number|Same phone as/.test(x.reason||""));
+  let g=pickRandom(good,5),b=pickRandom(bad,5);
+  if(g.length<5)b=pickRandom(bad,10-g.length);if(b.length<5)g=pickRandom(good,10-b.length);
+  const picks=[...g,...b];
+  $("spot").style.display="";
+  $("spot").innerHTML=`<div class="bar"><h3 class="grow" style="margin:0">Spot check: ${g.length} accepted, ${b.length} rejected</h3>
+      <button class="small" id="spotMore">Pick 10 more</button><button class="small" id="spotClose">Close</button></div>
+    <div class="muted" style="margin-bottom:8px">Open a few stores. If one looks wrong, send a screenshot to Claude. "Already have this number" rejections are left out, since those are just repeats.</div>
+    <div class="tablewrap"><table><thead><tr><th>Decision</th><th>Seller</th><th>Location</th><th></th></tr></thead><tbody>`+
+    (picks.length?picks.map(x=>`<tr>
+      <td style="width:230px">${x.status==="Good"?'<b style="color:var(--green);white-space:nowrap">✓ Accepted</b>':'<b style="color:var(--red);white-space:nowrap">✗ Rejected</b>'}
+        ${x.status!=="Good"?`<div class="why" style="margin-top:4px">${esc(x.reason)}</div>`:""}</td>
+      <td>${sellerCell(x)}</td><td>${placeCell(x)}</td><td style="text-align:right">${storeBtn(x)}</td></tr>`).join("")
+      :`<tr><td colspan="4" class="empty">No checked sellers in this search yet.</td></tr>`)+`</tbody></table></div>`;
+  $("spotMore").onclick=spotCheck;$("spotClose").onclick=()=>{$("spot").style.display="none";};
+  $("spot").scrollIntoView({behavior:"smooth",block:"start"});
+}
+$("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
+  $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
   const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
