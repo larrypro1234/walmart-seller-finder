@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 30
+VERSION = 31
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -378,6 +378,25 @@ def mark_leads(keys, status):
         with con:
             con.executemany("UPDATE leads SET status = ?, added = ? WHERE key = ?", [(status, when, k) for k in keys])
         con.close()
+
+
+def remove_lead(r, reason, source, key=None, phone=None):
+    """Take a lead out of Leads and block its number for good."""
+    key = key or lead_key(r)
+    phone = phone or normalize_phone(r.get("phone"))
+    with DB_LOCK:
+        con = leads_db()
+        with con:
+            con.execute("UPDATE leads SET status = 'rejected', added = ? WHERE key = ?",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M"), key))
+            if phone:
+                details = f"{reason} · {r.get('seller_name', '')} · {r.get('address', '')} · {r.get('seller_url', '')}"
+                con.execute("INSERT INTO numbers (phone, details, source, added) VALUES (?, ?, ?, ?) "
+                            "ON CONFLICT(phone) DO UPDATE SET details = excluded.details, source = excluded.source",
+                            (phone, details, source, datetime.now().strftime("%Y-%m-%d")))
+        con.close()
+    if phone:
+        KNOWN.add(phone)
 
 
 def reject_seller(r, why):
@@ -1209,9 +1228,9 @@ def find_hidden_sellers(br, products, sellers, stats):
 NOT_LOADED = "Walmart page didn't load. Press Finish checking to try again."
 
 
-def check_seller(br, rec, active_rules):
-    """Open one seller's page, fill in their details and apply the rules.
-    Returns False if Walmart's page didn't load (the seller stays unchecked)."""
+def load_seller(br, rec):
+    """Open one seller's Walmart page and fill in their details and products.
+    Returns False if Walmart's page didn't load."""
     cid = rec["catalog_seller_id"]
     if not cid.isdigit():
         html = br.get(rec["sample_product_url"])
@@ -1229,6 +1248,14 @@ def check_seller(br, rec, active_rules):
         rec["products"].update(info.pop("store_products"))
         rec.update(info)
     rec["store_mix"] = describe_mix(store_mix(rec))
+    return True
+
+
+def check_seller(br, rec, active_rules):
+    """Open one seller's page, fill in their details and apply the rules.
+    Returns False if Walmart's page didn't load (the seller stays unchecked)."""
+    if not load_seller(br, rec):
+        return False
     reasons = [r["check"](rec) for r in RULES if r["id"] in active_rules]
     reasons = [r for r in reasons if r]
     rec["status"] = "Rejected" if reasons else "Good"
@@ -1258,6 +1285,63 @@ def check_sellers(br, sellers, active_rules):
             rec["reason"] = NOT_LOADED
             log("  couldn't load this seller's page, leaving it for Finish checking")
         publish(sellers)
+
+
+def run_recheck(active_rules, delay):
+    """Open every waiting lead's store again and apply today's rules. Leads that fail are
+    removed and blocked; leads whose page doesn't load are kept as they are."""
+    rules = set(active_rules) - {"no_duplicate_phone"}  # their number is in the database because they're our lead
+    waiting = get_leads("new")
+    sellers = {}
+    for r in waiting:
+        rec = dict(r)
+        rec["keywords"] = {k.strip() for k in str(r.get("keywords") or "").split(";") if k.strip()}
+        rec["products"] = {}
+        rec["sample_product_url"] = r.get("found_from_url") or r.get("seller_url") or ""
+        rec["catalog_seller_id"] = str(r.get("catalog_seller_id") or "")
+        rec["status"], rec["reason"] = "Checking...", ""
+        rec["lead_key"], rec["lead_phone"] = r["key"], normalize_phone(r.get("phone"))  # as saved, before re-loading
+        sellers[r["key"]] = rec
+    log(f"Re-checking {len(sellers)} waiting leads with today's rules")
+    br, removed, unchecked = None, 0, 0
+    try:
+        br = Browser(delay)
+        publish(sellers)
+        for i, rec in enumerate(list(sellers.values()), 1):
+            if STATE["stop"]:
+                break
+            log(f"Re-checking lead {i}/{len(sellers)}: {rec['seller_name']}")
+            if not load_seller(br, rec):
+                rec["status"], rec["reason"] = "Good", "Kept: Walmart page didn't load, so it couldn't be re-checked"
+                unchecked += 1
+            else:
+                reasons = [r for r in (x["check"](rec) for x in RULES if x["id"] in rules) if r]
+                if reasons:
+                    reason = "; ".join(reasons)
+                    rec["status"], rec["reason"] = "Rejected", f"Re-check: {reason}"
+                    remove_lead(rec, f"Rejected on re-check: {reason}", "Rejected by app",
+                                key=rec["lead_key"], phone=rec["lead_phone"])
+                    removed += 1
+                    log(f"  removed: {reason}")
+                else:
+                    rec["status"], rec["reason"] = "Good", ""
+            publish(sellers)
+        for rec in sellers.values():  # stopped early: the rest stay as leads
+            if rec["status"] == "Checking...":
+                rec["status"], rec["reason"] = "Good", "Kept: not re-checked (stopped early)"
+        save_csv(sellers)
+        log(f"Done! Re-checked {len(sellers)} leads: {removed} removed, {len(sellers) - removed} kept"
+            + (f" ({unchecked} couldn't be opened, kept as they were)" if unchecked else "") + ".")
+    except Exception as e:
+        log(f"Something went wrong: {e}")
+        save_csv(sellers)
+    finally:
+        if br:
+            br.close()
+        with LOCK:
+            STATE["running"] = False
+            STATE["stop"] = False
+            STATE["skip_search"] = False
 
 
 def run_finish(active_rules, delay):
@@ -1574,6 +1658,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
       <button class="pill" data-l="added">Added to queue <span id="nAdded">0</span></button>
     </div>
     <span class="grow"></span>
+    <button id="recheck" class="small">Re-check with current rules</button>
     <button id="markAll" class="small">Mark all as added</button>
     <button class="small" onclick="location='/download?which=leads'" id="dlLeads">Download new leads</button>
   </div>
@@ -1706,7 +1791,7 @@ async function mark(keys,status){await fetch("/leads/mark",{method:"POST",body:J
 function drawLeads(){
   $("nLeads").textContent=leads.new.length;$("nAdded").textContent=leads.added.length;
   $("nLeadsNav").textContent=leads.new.length;$("nLeadsNav").classList.toggle("hot",leads.new.length>0);
-  $("markAll").style.display=$("dlLeads").style.display=leadView==="new"&&leads.new.length?"":"none";
+  $("markAll").style.display=$("dlLeads").style.display=$("recheck").style.display=leadView==="new"&&leads.new.length?"":"none";
   const list=leads[leadView];
   $("leadRows").innerHTML=list.length?list.map(x=>`<tr>
     <td>${sellerCell(x)}</td><td>${contactCell(x)}</td><td>${placeCell(x)}</td><td>${ratingCell(x)}</td>
@@ -1728,6 +1813,12 @@ async function rejectSeller(x){
   data.sellers.forEach(s=>{if(s.seller_name===x.seller_name&&(s.phone||"")===(x.phone||"")){s.status="Rejected";s.reason=r.reason;}});
   drawResults();return true;
 }
+$("recheck").onclick=async()=>{
+  if(data.running){alert("Wait until the app is done with what it's doing.");return;}
+  const n=leads.new.length,mins=Math.max(1,Math.round(n*7/60));
+  if(!n||!confirm(`Re-check all ${n} waiting leads with today's rules?\n\nThe app opens each store on Walmart again (about ${mins>90?Math.round(mins/60)+" hours":mins+" minutes"}). Leads that fail a rule are removed and blocked. The rest stay.`))return;
+  await fetch("/recheck",{method:"POST"});poll();
+};
 $("markAll").onclick=()=>{if(leads.new.length&&confirm(`Mark all ${leads.new.length} new leads as added to the queue?`))mark(leads.new.map(x=>x.key),"added");};
 
 // ---- search
@@ -1899,7 +1990,9 @@ async function poll(){
     const s=data.sellers,left=s.filter(x=>x.status==="Checking...").length,done=s.length-left,last=data.log[data.log.length-1]||"";
     const checking=/Checking seller/.test(last)||done>0;
     $("skip").style.display=checking?"none":"";
-    $("runTitle").textContent=checking?`Checking sellers: ${done} of ${s.length} done`:`Searching Walmart... ${s.length} sellers found so far`;
+    const rechecking=/Re-checking/.test(data.log[0]||"");
+    if(rechecking){$("skip").style.display="none";$("runTitle").textContent=`Re-checking leads: ${done} of ${s.length} done`;}
+    else $("runTitle").textContent=checking?`Checking sellers: ${done} of ${s.length} done`:`Searching Walmart... ${s.length} sellers found so far`;
     $("runDetail").textContent=last.replace(/^\d\d:\d\d:\d\d /,"");
     $("runBar").style.width=(checking&&s.length?Math.round(100*done/s.length):5)+"%";
   }
@@ -1997,6 +2090,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps({"reason": reject_seller(body.get("seller") or {}, (body.get("why") or "").strip()[:200])}))
         elif self.path == "/leads/mark":
             mark_leads(body.get("keys", []), "added" if body.get("status") == "added" else "new")
+            self.send('{"ok":true}')
+        elif self.path == "/recheck":
+            with LOCK:
+                if STATE["running"]:
+                    return self.send('{"ok":false}')
+                STATE.update(running=True, stop=False, skip_search=False, log=[], summary="")
+            threading.Thread(target=run_recheck, daemon=True,
+                             args=({r["id"] for r in RULES}, 2.0)).start()
             self.send('{"ok":true}')
         elif self.path == "/finish":
             with LOCK:
