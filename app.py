@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 38
+VERSION = 39
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -137,6 +137,15 @@ DONT_BUY = [
                          r"closet organizers?", r"(toy|dress up|kids) storage", r"storage (cabinet|organizer|unit|shelf)s?",
                          r"furniture")),
     ("Clothing", re.compile(CLOTHING_WORDS.pattern + r"|\b(hats?|caps|beanies?|scarf|scarves|gloves|belts?|handbags?|purses?)\b", re.I)),
+    ("Industrial", _words(r"industrial", r"machinist", r"mro", r"pneumatic", r"\d+ ?cfm", r"\d+ ?psi", r"shims?",
+                          r"feeler gauges?", r"(cutting|grinding|tapping) (fluid|oil)", r"coolant", r"lifting magnets?",
+                          r"magnetic lifters?", r"abrasive", r"sanding (discs?|belts?)", r"flap discs?", r"carbide",
+                          r"end mills?", r"lathe", r"milling", r"weld(ing|er|ers)?", r"hydraulic", r"valves?",
+                          r"pipe fittings?", r"(npt|bsp) fittings?", r"flanges?", r"bearings?", r"bushings?", r"gaskets?",
+                          r"o-?rings?", r"fasteners?", r"threaded rods?", r"(hex|anchor|carriage) bolts?", r"conveyor",
+                          r"forklift", r"pallet jacks?", r"(chain|electric) hoists?", r"rigging", r"shackles?",
+                          r"wire rope", r"solenoids?", r"contactors?", r"circuit breakers?", r"conduit", r"drum pumps?",
+                          r"spill kits?", r"safety cabinets?", r"osha", r"ansi z\d+")),
     ("Automotive", _words(r"car", r"cars", r"truck", r"tires?", r"brake", r"headlights?", r"tail ?lights?", r"bumper",
                           r"motor oil", r"spark plugs?", r"wiper blades?", r"auto parts?", r"automotive", r"vehicle",
                           r"seat covers?", r"floor mats?", r"radiator", r"alternator", r"oem", r"jeep", r"ford", r"chevy",
@@ -314,7 +323,7 @@ RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
 # Rejections that say something real about the seller. Their numbers are saved and
 # blocked from future searches. Others (like a seller page that didn't load) are not.
 BLOCKING_REASONS = ("Not a US seller", "Mostly sells what we don't buy", "Clothing-only store", "Private label",
-                    "Mostly no-name products")
+                    "Mostly no-name products", "Industrial store")
 
 
 def blocking_reason(reason):
@@ -1943,6 +1952,25 @@ def names_known_brand(product_text):
     return False
 
 
+INDUSTRIAL_NAME = re.compile(r"\b(industrial|industries|machinery|machine shop|hydraulics?|welding|fasteners?|"
+                             r"bearings?|mro|equipment supply|industrial supply)\b", re.I)
+
+
+def rule_no_industrial(s):
+    """Industrial stores: named like one ("A&M Industrial") or selling mostly industrial supplies.
+    Kept only if they clearly sell what we buy (3+ products)."""
+    counts = store_mix(s)
+    buy = sum(v for k, v in counts.items() if k in BUY_NAMES)
+    if buy >= 3:
+        return None
+    if INDUSTRIAL_NAME.search(s.get("seller_name") or ""):
+        return "Industrial store"
+    classified = sum(counts.values())
+    if counts.get("Industrial", 0) >= 3 and counts["Industrial"] / max(classified, 1) >= 0.4:
+        return f"Industrial store ({counts['Industrial']} industrial products)"
+    return None
+
+
 def rule_known_brands(s):
     texts = list(s.get("products", {}).values())
     if not texts:
@@ -1969,6 +1997,7 @@ RULES = [
     {"id": "no_private_label", "label": "No private-label stores (own brand only)", "check": rule_private_label},
     {"id": "no_no_name", "label": "No stores selling mostly no-name products", "check": rule_no_name_products},
     {"id": "known_brands", "label": "Only stores that carry at least 1 of our brands", "check": rule_known_brands},
+    {"id": "no_industrial", "label": "No industrial stores", "check": rule_no_industrial},
     {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
@@ -3187,6 +3216,7 @@ function reasonGroup(x){
   if(/Private label/.test(r))return "Private label";
   if(/no-name products/.test(r))return "No-name products";
   if(/None of our brands/.test(r))return "None of our brands";
+  if(/Industrial store/.test(r))return "Industrial store";
   if(/Rejected by you/.test(r))return "Rejected by you";
   return "Other";
 }
@@ -3220,7 +3250,7 @@ $("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
   $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
-  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","None of our brands","Rejected by you","Not checked yet","Other"];
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","None of our brands","Industrial store","Rejected by you","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
     `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
 }
