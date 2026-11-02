@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 34
+VERSION = 35
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -807,6 +807,31 @@ RULES = [
 
 
 # Brand ideas shown in the app's Search tab, grouped by the categories we buy.
+# Category ideas: plain product words for the categories we buy. Searching these finds
+# sellers of any brand (the rules still decide who's a good lead). "Find random sellers"
+# picks from these and the brand ideas.
+CATEGORY_IDEAS = {
+    "Health & Beauty": ["face moisturizer", "facial cleanser", "sunscreen", "mascara", "lipstick", "foundation makeup",
+                        "nail polish", "makeup remover", "eye cream", "body lotion", "lip balm", "hair dye"],
+    "OTC": ["allergy relief", "pain reliever", "cold and flu medicine", "cough syrup", "antacid", "sleep aid",
+            "nasal spray", "eye drops", "first aid kit", "bandages", "hydrocortisone cream", "heartburn relief"],
+    "Personal Care": ["shampoo", "conditioner", "body wash", "bar soap", "deodorant", "toothpaste", "toothbrush",
+                      "mouthwash", "razors", "shaving cream", "hair styling gel", "dental floss", "feminine care"],
+    "Household Essentials": ["laundry detergent", "dish soap", "disinfecting wipes", "all purpose cleaner", "paper towels",
+                             "toilet paper", "trash bags", "fabric softener", "air freshener", "sponges",
+                             "dishwasher pods", "bleach", "food storage bags"],
+    "Baby": ["diapers", "baby wipes", "baby formula", "baby bottles", "pacifiers", "baby shampoo", "diaper rash cream",
+             "baby food", "teething toys", "sippy cups"],
+    "Supplements": ["vitamins", "multivitamin", "vitamin d3", "fish oil", "probiotics", "protein powder", "melatonin",
+                    "vitamin c", "magnesium", "collagen", "elderberry", "electrolyte powder"],
+    "Toys & Games": ["board games", "card games", "action figures", "dolls", "building blocks", "puzzles", "plush toys",
+                     "toy cars", "play dough", "remote control car", "outdoor toys", "educational toys",
+                     "trading cards", "arts and crafts kit"],
+    "General Merchandise": ["phone charger", "headphones", "batteries", "light bulbs", "storage bins", "kitchen gadgets",
+                            "water bottles", "school supplies", "pet treats", "party games", "flashlight", "extension cord"],
+    "Apparel basics": ["socks", "boxer briefs", "undershirts", "underwear multipack", "kids socks"],
+}
+
 BRAND_IDEAS = {
     "Toys & Games": ["LEGO", "Hasbro", "Mattel", "Barbie", "Hot Wheels", "Fisher-Price", "Nerf", "Play-Doh",
                      "Melissa & Doug", "Crayola", "Funko", "Squishmallows", "VTech", "Little Tikes", "Magna-Tiles",
@@ -1770,7 +1795,16 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:10px
       <div id="rules"></div>
     </div>
   </div>
-  <div style="margin-top:16px"><button id="start" class="primary big">Start search</button></div>
+  <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <button id="start" class="primary big">Start search</button>
+    <button id="random" class="big">🎲 Find random sellers</button>
+    <span class="muted">Picks 10 random category or brand words (ones you haven't searched first) and starts.</span>
+  </div>
+</div>
+<div class="card">
+  <h2>Category ideas</h2>
+  <p class="sub">Plain product words for the categories you buy. They find sellers of any brand. Click one to add it to your search.</p>
+  <div id="cats"></div>
 </div>
 <div class="card">
   <h2>Brand ideas</h2>
@@ -1984,15 +2018,30 @@ function drawResults(){
 }
 
 // ---- brand ideas
+let cats={};
 fetch("/brands").then(r=>r.json()).then(b=>{brands=b;drawBrands();});
-function drawBrands(){
+fetch("/categories").then(r=>r.json()).then(c=>{cats=c;drawBrands();});
+function drawBrands(){drawIdeas("brands",brands);drawIdeas("cats",cats);}
+function drawIdeas(id,ideas){
   const picked=new Set(words().map(w=>w.toLowerCase())), hist={};
   history.forEach(h=>hist[h.keyword]=h);
-  $("brands").innerHTML=Object.entries(brands).map(([cat,list])=>`<div class="cat">${esc(cat)}</div><div class="chips">`+
+  $(id).innerHTML=Object.entries(ideas).map(([cat,list])=>`<div class="cat">${esc(cat)}</div><div class="chips">`+
     list.map(b=>{const k=b.toLowerCase(),h=hist[k];
       const cls=picked.has(k)?"picked":h?(h.due?"due":"done"):"";
       return `<button class="chip ${cls}" data-b="${esc(b)}" title="${h?`Last searched ${esc(h.last_run)}`:"Not searched yet"}">${esc(b)}</button>`;}).join("")+`</div>`).join("");
 }
+// ---- random search: 10 words, never-searched first, then ones that are due, then the rest
+$("random").onclick=()=>{
+  if(data.running){alert("Wait until the app is done with what it's doing.");return;}
+  const hist={};history.forEach(h=>hist[h.keyword]=h);
+  const seen=new Set(),all=[...Object.values(cats).flat(),...Object.values(brands).flat()].filter(w=>!seen.has(w.toLowerCase())&&seen.add(w.toLowerCase()));
+  const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
+  const fresh=shuffle(all.filter(w=>!hist[w.toLowerCase()])),due=shuffle(all.filter(w=>hist[w.toLowerCase()]?.due)),
+        rest=shuffle(all.filter(w=>hist[w.toLowerCase()]&&!hist[w.toLowerCase()].due));
+  setWords([...fresh,...due,...rest].slice(0,10));
+  $("start").click();
+};
+$("cats").onclick=e=>$("brands").onclick(e);
 $("brands").onclick=e=>{
   const b=e.target.closest("[data-b]");if(!b)return;
   const w=words(),k=b.dataset.b.toLowerCase(),i=w.findIndex(x=>x.toLowerCase()===k);
@@ -2119,6 +2168,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps(lookup(parse_qs(url.query).get("q", [""])[0])))
         elif url.path == "/brands":
             self.send(json.dumps(BRAND_IDEAS))
+        elif url.path == "/categories":
+            self.send(json.dumps(CATEGORY_IDEAS))
         elif url.path == "/history":
             self.send(json.dumps(get_history()))
         elif url.path == "/leads":
