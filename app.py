@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 33
+VERSION = 34
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -296,7 +296,8 @@ RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
 
 # Rejections that say something real about the seller. Their numbers are saved and
 # blocked from future searches. Others (like a seller page that didn't load) are not.
-BLOCKING_REASONS = ("Not a US seller", "Mostly sells what we don't buy", "Clothing-only store", "Private label")
+BLOCKING_REASONS = ("Not a US seller", "Mostly sells what we don't buy", "Clothing-only store", "Private label",
+                    "Mostly no-name products")
 
 
 def blocking_reason(reason):
@@ -727,10 +728,80 @@ def rule_private_label(s):
     return None
 
 
+# No-name stores: most products have no real brand ("Sodium Citrate Powder 10 oz...").
+# A product counts as branded if Walmart lists a real brand for it, if it names an
+# established brand, or if its first word isn't a plain English word (CeraVe, Hasbro...).
+DICT_FILE = Path("/usr/share/dict/words")  # comes with every Mac
+_ENGLISH = []
+# Real brands that are plain English words, so they don't look like no-name products.
+WORD_BRANDS = set("""suave dial axe dove secret degree tide gain glad era cheer joy bounce all scott cottonelle
+    kleenex charmin bounty dawn crest scope always tampax playtex simple method native herbal clean gold bond
+    caress zest coast shield irish spring ivory olay aussie raid off glade pledge windex shout resolve finish
+    cascade palmolive ajax comet arm hammer oxiclean purex snuggle downy bold persil sun tylenol excedrin
+    mucinex vicks theraflu robitussin zicam emergen airborne centrum nature made spring valley one day
+    vitafusion olly kirkland equate great value parent choice up&up member mark hanes champion jockey
+    puffs angel soft quilted northern hefty ziploc solo dixie reynolds glad hot wheels nerf fisher price
+    little tikes step crayola elmer sharpie bic paper mate expo post-it scotch duck gorilla
+    first years summer munchkin boppy graco evenflo chicco nuby tommee tippee playskool""".split())
+GENERIC_PRODUCT_WORDS = set("""allulose gummies gummy keto collagen probiotic probiotics electrolyte electrolytes
+    bluetooth usb led lcd hdmi iphone ipad android airpods magsafe wifi rgb vegan organic""".split())
+NO_BRAND = {"", "unbranded", "generic", "no brand", "none", "n a", "na", "null", "unknown", "other"}
+
+
+def english_words():
+    if not _ENGLISH:
+        try:
+            _ENGLISH.append({w.strip() for w in DICT_FILE.read_text(errors="ignore").splitlines() if w.strip().islower()})
+        except OSError:
+            _ENGLISH.append(set())
+    return _ENGLISH[0]
+
+
+def full_brand_names():
+    """Whole brand names from Brand ideas ("nature made", "lego"), minus the plain category ideas."""
+    return {norm(b) for group in BRAND_IDEAS.values() for b in group} - {"board games", "puzzles", "gildan socks"}
+
+
+def plain_word(w):
+    words = english_words()
+    w = w.lower().replace("'s", "").replace("'", "")
+    return w in words or (w.endswith("s") and w[:-1] in words) or (w.endswith("es") and w[:-2] in words)
+
+
+def is_branded(product_text, seller_words):
+    m = re.search(r"\| brand: (.+)$", product_text or "")
+    if m:
+        brand = norm(m.group(1))
+        if brand not in NO_BRAND and not set(brand.split()) <= seller_words:
+            return True
+    title = norm(re.sub(r"\| brand: .+$", "", product_text or ""))
+    padded = f" {title} "
+    if any(f" {b} " in padded for b in full_brand_names()):  # e.g. "2 pack lego city ..."
+        return True
+    if any(title == b or title.startswith(b + " ") for b in WORD_BRANDS):  # "suave shampoo", not "all purpose flour"
+        return True
+    first = next((w for w in title.split() if w.isalpha()), "")
+    if not first or first in seller_words or first in GENERIC_PRODUCT_WORDS or len(first) <= 2:
+        return False  # no brand, or the seller's own name
+    return not plain_word(first)
+
+
+def rule_no_name_products(s):
+    texts = list(s.get("products", {}).values())
+    if len(texts) < 5 or not english_words():
+        return None  # too few products to judge, or no word list on this computer
+    seller_words = set(seller_core(s.get("seller_name")).split())
+    no_name = sum(1 for t in texts if not is_branded(t, seller_words))
+    if no_name / len(texts) >= 0.8:
+        return f"Mostly no-name products ({no_name} of {len(texts)} have no real brand)"
+    return None
+
+
 RULES = [
     {"id": "us_only", "label": "Only US sellers", "check": rule_us_only},
     {"id": "store_categories", "label": "Only stores that sell what we buy", "check": rule_store_categories},
     {"id": "no_private_label", "label": "No private-label stores (own brand only)", "check": rule_private_label},
+    {"id": "no_no_name", "label": "No stores selling mostly no-name products", "check": rule_no_name_products},
     {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
@@ -1856,6 +1927,7 @@ function reasonGroup(x){
   if(/Not a US seller|Country not shown/.test(r))return "Not US / no US address";
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
   if(/Private label/.test(r))return "Private label";
+  if(/no-name products/.test(r))return "No-name products";
   if(/Rejected by you/.test(r))return "Rejected by you";
   return "Other";
 }
@@ -1889,7 +1961,7 @@ $("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
   $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
-  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","Rejected by you","Not checked yet","Other"];
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","No-name products","Rejected by you","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
     `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
 }
