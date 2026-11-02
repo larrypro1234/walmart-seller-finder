@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 29
+VERSION = 30
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -296,7 +296,7 @@ RUN_PHONES = {}  # phone -> seller name, for good sellers in the current search
 
 # Rejections that say something real about the seller. Their numbers are saved and
 # blocked from future searches. Others (like a seller page that didn't load) are not.
-BLOCKING_REASONS = ("Not a US seller", "Mostly sells what we don't buy", "Clothing-only store")
+BLOCKING_REASONS = ("Not a US seller", "Mostly sells what we don't buy", "Clothing-only store", "Private label")
 
 
 def blocking_reason(reason):
@@ -627,9 +627,56 @@ def rule_no_duplicate_phone(s):
     return None
 
 
+# Private label: a store whose products mostly carry the store's own name as the brand
+# (e.g. store "Shiny Leaf" selling only "Shiny Leaf ..." products). Stores named after an
+# established brand, or with generic names, are never flagged.
+COMPANY_WORDS = set("""llc inc co corp corporation company store stores shop shoppe official the ltd us usa
+    trading group enterprises enterprise holdings supply supplies distribution distributors distributor wholesale
+    outlet direct goods mart market online international intl and of""".split())
+GENERIC_WORDS = set("""toy toys kid kids baby babies home beauty health pet pets game games gift gifts deal deals
+    discount discounts best top value smart big little happy family world life essentials essential products
+    product brands brand things stuff daily everyday plus pro prime express quick fast depot center hub zone house
+    land city bargain bargains savings shopping retail sales seller sellers new great good more one all star""".split())
+
+
+def norm(text):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
+
+
+def seller_core(name):
+    """The distinctive part of a seller's name: 'Shiny Leaf LLC' -> 'shiny leaf'."""
+    return " ".join(w for w in norm(name).split() if w not in COMPANY_WORDS)
+
+
+def established_brands():
+    names = {norm(b) for group in BRAND_IDEAS.values() for b in group} | {norm(k) for k in RELATED_TERMS}
+    return names | {n.split()[0] for n in names if len(n.split()[0]) >= 4}
+
+
+def own_brand(product_text, core):
+    t = norm(product_text)
+    squeeze = lambda x: x.replace(" ", "")
+    return (t.startswith(core + " ") or t == core or squeeze(t).startswith(squeeze(core))
+            or f"brand {core}" in t)
+
+
+def rule_private_label(s):
+    core = seller_core(s.get("seller_name"))
+    if len(core) < 4 or set(core.split()) <= GENERIC_WORDS or core in established_brands():
+        return None
+    texts = list(s.get("products", {}).values())
+    if len(texts) < 3:
+        return None
+    own = sum(1 for t in texts if own_brand(t, core))
+    if own / len(texts) >= 0.7:
+        return f"Private label: sells only its own brand ({s['seller_name']}, {own} of {len(texts)} products)"
+    return None
+
+
 RULES = [
     {"id": "us_only", "label": "Only US sellers", "check": rule_us_only},
     {"id": "store_categories", "label": "Only stores that sell what we buy", "check": rule_store_categories},
+    {"id": "no_private_label", "label": "No private-label stores (own brand only)", "check": rule_private_label},
     {"id": "no_duplicate_phone", "label": "Skip numbers we already have", "check": rule_no_duplicate_phone},
 ]
 
@@ -768,8 +815,10 @@ def first(obj, *keys):
 
 
 def item_text(d):
-    """Product name plus any category/department info, used to classify the product."""
+    """Product name plus any category/department/brand info, used to classify the product."""
     parts = [d.get("name") or ""]
+    if isinstance(d.get("brand"), str) and d["brand"].strip():
+        parts.append(f"| brand: {d['brand'].strip()}")
     for k, v in d.items():
         if "categor" in k.lower() or "department" in k.lower():
             parts.append(v if isinstance(v, str) else json.dumps(v))
@@ -1668,6 +1717,7 @@ function reasonGroup(x){
   if(/Already have this number|Same phone as/.test(r))return "Already have";
   if(/Not a US seller|Country not shown/.test(r))return "Not US / no US address";
   if(/Mostly sells what we don't buy|Clothing-only/.test(r))return "Sells what we don't buy";
+  if(/Private label/.test(r))return "Private label";
   return "Other";
 }
 // ---- spot check: 10 random sellers from the latest search, half accepted and half rejected
@@ -1695,7 +1745,7 @@ $("spotBtn").onclick=spotCheck;
 function drawBreakdown(){
   $("spotBar").style.display=!data.running&&data.sellers.some(x=>x.status==="Good"||x.status==="Rejected")?"":"none";
   const counts={};data.sellers.forEach(x=>{const g=reasonGroup(x);counts[g]=(counts[g]||0)+1;});
-  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Not checked yet","Other"];
+  const order=["New leads","Already have","Not US / no US address","Sells what we don't buy","Private label","Not checked yet","Other"];
   $("breakdown").innerHTML=data.sellers.length?order.filter(k=>counts[k]).map(k=>
     `<span class="chip" style="cursor:default${k==="New leads"?";background:var(--green-soft);border-color:#b5e3cd;color:var(--green)":""}"><b>${counts[k]}</b>&nbsp;${esc(k)}</span>`).join(""):"";
 }
