@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 32
+VERSION = 33
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -722,7 +722,7 @@ def rule_private_label(s):
         if len(brand) < 4 or set(brand.split()) <= GENERIC_WORDS or brand in known:
             continue
         own = sum(1 for t in texts if own_brand(t, brand))
-        if own / len(texts) >= 0.7:
+        if own / len(texts) >= 0.5:  # half or more of what they sell is their own brand
             return f"Private label: sells only its own brand ({brand.title()}, {own} of {len(texts)} products)"
     return None
 
