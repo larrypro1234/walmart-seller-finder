@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 42
+VERSION = 43
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -456,6 +456,15 @@ def reject_seller(r, why):
         (HERE / STATE["saved_file"]).write_text(to_csv(rows), encoding="utf-8")
     log(f"You rejected {r.get('seller_name', 'a seller')}" + (f" ({why})" if why else ""))
     return reason
+
+
+def update_lead(key, r):
+    """Save a lead's latest details (after a re-check) without changing whether it's new or added."""
+    with DB_LOCK:
+        con = leads_db()
+        with con:
+            con.execute("UPDATE leads SET data = ? WHERE key = ?", (json.dumps(r), key))
+        con.close()
 
 
 def lead_counts():
@@ -1975,14 +1984,57 @@ def build_brand_index():
     return names - start_only - EVERYDAY_WORD_BRANDS, start_only, max(len(n.split()) for n in names)
 
 
-def names_known_brand(product_text):
+def matched_brand(product_text):
+    """Which of our brands this product is (as a normalized name), or "" if none."""
     m = re.search(r"\| brand: (.+)$", product_text or "")
     anywhere, start_only, longest = known_brand_index()
     if m and norm(m.group(1)) in anywhere | start_only | EVERYDAY_WORD_BRANDS:
-        return True
+        return norm(m.group(1))
     # The brand has to start the product name ("LEGO Star Wars ..."): a brand named later is usually
     # "compatible with LEGO" or "includes Always pads", not the product's own brand.
-    return starts_with_any(lead_words(re.sub(r"\| brand: .+$", "", product_text or "")), anywhere | start_only, longest)
+    words = lead_words(re.sub(r"\| brand: .+$", "", product_text or ""))
+    names = anywhere | start_only
+    for n in range(1, min(longest, len(words)) + 1):  # shortest real brand first: "barbie", not "barbie dreamhouse"
+        if " ".join(words[:n]) in names:
+            return " ".join(words[:n])
+    return ""
+
+
+_DISPLAY = {}
+
+
+def brand_display(name):
+    """A brand as written in our lists ("LEGO", "L'Oréal"), from its normalized name."""
+    if not _DISPLAY:
+        for b in [l.strip() for l in YOUR_BRANDS.splitlines()] + WELL_KNOWN_BRANDS + [x for g in BRAND_IDEAS.values() for x in g]:
+            b = re.sub(r"\(.*?\)", "", b).strip()
+            if b and any(c.isupper() for c in b):
+                _DISPLAY.setdefault(norm(b), b)
+    return _DISPLAY.get(name) or name.title()
+
+
+def names_known_brand(product_text):
+    return bool(matched_brand(product_text))
+
+
+def product_name(product_text):
+    """Just the product's name, without the category/brand details the app keeps with it."""
+    return re.split(r" \| brand: | \{| \[", product_text or "", maxsplit=1)[0].strip()
+
+
+def brands_found(rec):
+    """Which of our brands a store carries, for the lead: "LEGO ×3 (e.g. LEGO Classic ...) · Hasbro ×1"."""
+    hits = {}
+    for t in rec.get("products", {}).values():
+        b = matched_brand(t)
+        if b:
+            hits.setdefault(b, []).append(product_name(t))
+    if not hits:
+        return ""
+    ranked = sorted(hits.items(), key=lambda kv: -len(kv[1]))
+    parts = [f"{brand_display(b)} ×{len(ts)}" + (f" (e.g. {ts[0][:60]})" if i == 0 else "") for i, (b, ts) in enumerate(ranked[:4])]
+    more = f" · +{len(ranked) - 4} more brands" if len(ranked) > 4 else ""
+    return " · ".join(parts) + more
 
 
 INDUSTRIAL_NAME = re.compile(r"\b(industrial|industries|machinery|machine shop|hydraulics?|welding|fasteners?|"
@@ -2593,6 +2645,7 @@ def load_seller(br, rec, skip_seller=None, skip_number=None):
                 rec["products"].update({str(d["usItemId"]): item_text(d)
                                         for d in walk(data) if d.get("usItemId") and d.get("name")})
     rec["store_mix"] = describe_mix(store_mix(rec))
+    rec["brands_found"] = brands_found(rec)
     return True
 
 
@@ -2712,6 +2765,7 @@ def run_recheck(active_rules, delay):
                     log(f"  removed: {reason}")
                 else:
                     rec["status"], rec["reason"] = "Good", ""
+                    update_lead(rec["lead_key"], row(rec))  # keep the lead, with what we saw today
             publish(sellers)
         for rec in sellers.values():  # stopped early: the rest stay as leads
             if rec["status"] == "Checking...":
@@ -2903,7 +2957,7 @@ def run_scrape(keywords, pages, active_rules, delay, every_corner=False, hidden_
 
 COLUMNS = ["status", "reason", "marketplace", "seller_name", "business_name", "phone", "email", "address", "country",
            "rating", "review_count", "seller_url", "catalog_seller_id", "products_checked", "store_mix", "keywords",
-           "found_from", "found_from_url"]
+           "found_from", "found_from_url", "brands_found"]
 
 
 def row(rec):
@@ -3170,6 +3224,8 @@ function sellerCell(x){
   return `<div class="name">${esc(x.seller_name)}${x.marketplace?` <span class="tag" style="vertical-align:middle">${esc(x.marketplace)}</span>`:""}</div>`+
     (x.business_name&&x.business_name!==x.seller_name?`<div class="muted">${esc(x.business_name)}</div>`:"")+
     (x.store_mix?`<div>${x.store_mix.split(" · ").map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</div>`:"")+
+    (x.brands_found?`<div style="margin-top:4px;font-size:13px;color:var(--green)">Your brands: ${esc(x.brands_found)}</div>`
+      :(x.status==="Good"&&x.brands_found===undefined?`<div style="margin-top:4px;font-size:13px;color:var(--muted)">Your brands: not checked yet (run Re-check)</div>`:""))+
     (x.found_from?`<div class="muted" style="margin-top:4px">Found from <a href="${esc(x.found_from_url)}" target="_blank">${esc(x.found_from)}</a></div>`:"");
 }
 const fmtPhone=p=>{const d=String(p||"").replace(/\D/g,"").replace(/^1(?=\d{10}$)/,"");return d.length===10?`(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`:p;};
