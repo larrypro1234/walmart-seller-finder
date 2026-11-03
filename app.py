@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 40
+VERSION = 41
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -801,6 +801,22 @@ def plain_word(w):
     return w in words or (w.endswith("s") and w[:-1] in words) or (w.endswith("es") and w[:-2] in words)
 
 
+LEAD_FILLER = {"new", "original", "genuine", "authentic", "official", "brand"}
+
+
+def lead_words(title):
+    """A product name's words from where the brand normally is: "2 Pack - New LEGO City" -> "lego city ...".
+    Brands named later ("Building Blocks Compatible with LEGO", "Kit with Always Pads") don't count."""
+    words = norm(title).split()
+    while words and (words[0].isdigit() or words[0] in PACK_WORDS or words[0] in LEAD_FILLER):
+        words = words[1:]
+    return words
+
+
+def starts_with_any(words, names, longest):
+    return any(" ".join(words[:n]) in names for n in range(1, min(longest, len(words)) + 1))
+
+
 def is_branded(product_text, seller_words):
     m = re.search(r"\| brand: (.+)$", product_text or "")
     if m:
@@ -808,10 +824,8 @@ def is_branded(product_text, seller_words):
         if brand not in NO_BRAND and not set(brand.split()) <= seller_words:
             return True
     title = norm(re.sub(r"\| brand: .+$", "", product_text or ""))
-    padded = f" {title} "
-    if any(f" {b} " in padded for b in full_brand_names()):  # e.g. "2 pack lego city ..."
-        return True
-    if any(title == b or title.startswith(b + " ") for b in WORD_BRANDS):  # "suave shampoo", not "all purpose flour"
+    words = lead_words(title)
+    if starts_with_any(words, full_brand_names() | WORD_BRANDS, 4):  # "lego city ...", "suave shampoo"
         return True
     first = next((w for w in title.split() if w.isalpha()), "")
     if not first or first in seller_words or first in GENERIC_PRODUCT_WORDS or len(first) <= 2:
@@ -1949,15 +1963,9 @@ def names_known_brand(product_text):
     anywhere, start_only, longest = known_brand_index()
     if m and norm(m.group(1)) in anywhere | start_only | EVERYDAY_WORD_BRANDS:
         return True
-    words = norm(re.sub(r"\| brand: .+$", "", product_text or "")).split()
-    while words and (words[0].isdigit() or words[0] in PACK_WORDS):
-        words = words[1:]  # "2 pack tide pods" -> "tide pods"
-    for n in range(1, longest + 1):
-        if " ".join(words[:n]) in start_only:
-            return True
-        if any(" ".join(words[i:i + n]) in anywhere for i in range(len(words) - n + 1)):
-            return True
-    return False
+    # The brand has to start the product name ("LEGO Star Wars ..."): a brand named later is usually
+    # "compatible with LEGO" or "includes Always pads", not the product's own brand.
+    return starts_with_any(lead_words(re.sub(r"\| brand: .+$", "", product_text or "")), anywhere | start_only, longest)
 
 
 INDUSTRIAL_NAME = re.compile(r"\b(industrial|industries|machinery|machine shop|hydraulics?|welding|fasteners?|"
