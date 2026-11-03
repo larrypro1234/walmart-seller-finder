@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 39
+VERSION = 40
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -766,14 +766,16 @@ DICT_FILE = Path("/usr/share/dict/words")  # comes with every Mac
 _ENGLISH = []
 # Real brands that are plain English words, so they don't look like no-name products.
 WORD_BRANDS = set("""suave dial axe dove secret degree tide gain glad era cheer joy bounce all scott cottonelle
-    kleenex charmin bounty dawn crest scope always tampax playtex simple method native herbal clean gold bond
-    caress zest coast shield irish spring ivory olay aussie raid off glade pledge windex shout resolve finish
-    cascade palmolive ajax comet arm hammer oxiclean purex snuggle downy bold persil sun tylenol excedrin
-    mucinex vicks theraflu robitussin zicam emergen airborne centrum nature made spring valley one day
-    vitafusion olly kirkland equate great value parent choice up&up member mark hanes champion jockey
-    puffs angel soft quilted northern hefty ziploc solo dixie reynolds glad hot wheels nerf fisher price
-    little tikes step crayola elmer sharpie bic paper mate expo post-it scotch duck gorilla
-    first years summer munchkin boppy graco evenflo chicco nuby tommee tippee playskool""".split())
+    kleenex charmin bounty dawn crest scope always tampax playtex simple method native caress zest coast shield
+    ivory olay aussie raid off glade pledge windex shout resolve finish cascade palmolive ajax comet purex snuggle
+    downy bold persil sun tylenol excedrin mucinex vicks theraflu robitussin zicam emergen airborne centrum
+    vitafusion olly kirkland equate hanes champion jockey puffs hefty ziploc solo dixie reynolds nerf crayola
+    elmer sharpie bic expo scotch duck gorilla summer munchkin boppy graco evenflo chicco nuby playskool""".split()) | {
+    # brands of several words, kept whole ("gold bond", not "gold" and "bond")
+    "gold bond", "irish spring", "arm hammer", "herbal essences", "clean clear", "nature made", "one a day",
+    "great value", "parents choice", "up up", "members mark", "angel soft", "quilted northern", "hot wheels",
+    "fisher price", "little tikes", "paper mate", "post it", "the first years", "tommee tippee", "spring valley",
+    "step2"}
 GENERIC_PRODUCT_WORDS = set("""allulose gummies gummy keto collagen probiotic probiotics electrolyte electrolytes
     bluetooth usb led lcd hdmi iphone ipad android airpods magsafe wifi rgb vegan organic""".split())
 NO_BRAND = {"", "unbranded", "generic", "no brand", "none", "n a", "na", "null", "unknown", "other"}
@@ -1822,6 +1824,7 @@ WD-40
 Lucas Oil
 """
 NOT_BRANDS = {"case pack"}
+NEVER_TRIM_TO = {"first aid", "power stick"}  # everyday product phrases
 # Our brands that are also everyday words at the start of product names ("Fresh Cut Flowers",
 # "Simply Delicious..."): they only count when Walmart lists them as the product's brand.
 EVERYDAY_WORD_BRANDS = {"fresh", "simply", "hello", "seed", "origins", "sequence", "matrix", "sorry", "clue",
@@ -1922,7 +1925,9 @@ def our_brand_names():
         while len(words) > 1 and words[-1] in DESCRIPTOR_WORDS:
             words = words[:-1]  # "folgers coffee" -> "folgers"
         core = " ".join(words)
-        if core != name and (" " in core or (len(core) >= 4 and not plain_word(core))):
+        if core == name or core in NEVER_TRIM_TO or any(len(w) == 1 for w in words):
+            continue  # "first aid beauty" must not become "first aid"; "a&w root beer" not "a w"
+        if " " in core or (len(core) >= 4 and not plain_word(core)):
             names.add(core)  # only if what's left is still clearly a brand ("gain" alone is not)
     return names
 
@@ -1932,7 +1937,10 @@ def build_brand_index():
     English words ("tide", "all") or very short ("hp") that only count at the start of the name."""
     names = our_brand_names() | {norm(b) for b in WELL_KNOWN_BRANDS} | full_brand_names() | {norm(b) for b in WORD_BRANDS}
     names = {n for n in names if n and not n.isdigit()}
-    start_only = {n for n in names if " " not in n and (len(n) <= 3 or plain_word(n))} - EVERYDAY_WORD_BRANDS
+    # Plain-word names ("tide", "clear eyes", "comfort zone") and very short ones ("hp") only count at the
+    # start of a product name, so "earrings with black diamond" isn't the Black Diamond brand.
+    start_only = {n for n in names if (" " not in n and len(n) <= 3)
+                  or all(plain_word(w) or w.isdigit() for w in n.split())} - EVERYDAY_WORD_BRANDS
     return names - start_only - EVERYDAY_WORD_BRANDS, start_only, max(len(n.split()) for n in names)
 
 
