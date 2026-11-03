@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
-VERSION = 41
+VERSION = 42
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/walmart-seller-finder/main/app.py"
 BASE = "https://www.walmart.com"
 MAX_PAGES = 25  # never ask for more than this many result pages for one search
@@ -741,10 +741,27 @@ def own_brand(product_text, core):
             or f"brand {core}" in t)
 
 
+def official_store_brand(s, texts):
+    """A store with "Official" in its name that sells mostly one brand is that brand's owner
+    ("GN Official Store" selling SteelSeries). Returns the brand, or None."""
+    if "official" not in norm(s.get("seller_name")).split():
+        return None
+    firsts = [w[0] for w in (lead_words(re.sub(r"\| brand: .+$", "", t)) for t in texts) if w]
+    if not firsts:
+        return None
+    brand = max(set(firsts), key=firsts.count)
+    if firsts.count(brand) / len(texts) >= 0.5 and len(brand) >= 3 and brand not in GENERIC_WORDS and not plain_word(brand):
+        return brand
+    return None
+
+
 def rule_private_label(s):
     texts = list(s.get("products", {}).values())
     if len(texts) < 3:
         return None
+    owner = official_store_brand(s, texts)
+    if owner:
+        return f"Private label: brand owner's official store ({owner.title()})"
     words = seller_core(s.get("seller_name")).split()
     known = established_brands()
     # The brand can be the whole store name ("Shiny Leaf") or its start
